@@ -1,0 +1,74 @@
+# Copy to config.toml and edit. Every value shown is the default.
+# Run with:  uv run littax run raw -c config.toml
+
+source_root = "raw"          # folder of PDFs; never modified
+out_dir     = "out"           # taxonomy.json lands here
+cache_dir   = ".cache"        # safe to delete; only costs time to rebuild
+target_root = "organised"     # root of the proposed folder tree in move_plan
+
+[ingest]
+glob = "**/*.pdf"
+# Below this many characters per page a PDF is treated as a scan: flagged
+# degraded and profiled from its filename alone.
+degraded_chars_per_page = 100
+abstract_max_chars = 3000
+# Words of body text to use when no abstract can be found.
+profile_body_words = 400
+
+[embed]
+# tfidf   - no download, no PyTorch. Fast, decent, the Phase 1 baseline.
+# bge     - BAAI/bge-base-en-v1.5. General-purpose, strong. Needs --extra ml.
+# specter - allenai-specter, trained on scientific title+abstract pairs.
+backend = "bge"
+# model_name = "BAAI/bge-base-en-v1.5"   # override the backend's default model
+svd_components = 256          # tfidf only
+max_features = 50000
+min_df = 2
+max_df = 0.5
+
+[cluster]
+# agglomerative - Ward, deterministic, always yields a strict tree.
+# hdbscan       - finds natural groups and flags outliers; needs a reducer.
+algorithm = "hdbscan"
+# none | pca | umap. umap needs --extra ml but separates topics far better.
+reducer = "umap"
+reduce_components = 10
+
+max_depth = 3
+min_split_size = 25           # nodes smaller than this stay leaves
+min_leaf_size = 8             # no child smaller than this...
+max_branching = 8             # ...and at most this many children per node
+# min_cluster_size = 12       # hdbscan only; omit for adaptive
+random_state = 42
+
+[score]
+# Weights are renormalised over whichever components the algorithm supplies,
+# so agglomerative (no membership probability) still scores on 0-1.
+w_similarity = 0.5
+w_margin = 0.3
+w_membership = 0.2
+
+band_high = 0.70
+band_medium = 0.45
+
+# On the calibrated scale, not raw cosine. Below this a document goes to
+# _Unsorted rather than being forced into the least-bad folder.
+unsorted_threshold = 0.15
+duplicate_threshold = 0.98
+
+[terms]
+top_n = 25
+max_features = 20000
+ngram_max = 2
+
+[label]
+# Phase 3. Needs --extra llm plus ANTHROPIC_FOUNDRY_API_KEY and
+# ANTHROPIC_FOUNDRY_RESOURCE in the environment (see .env.example).
+enabled = false
+model = "claude-opus-5"
+max_workers = 6               # Foundry has no Batch API, so calls run threaded
+max_retries = 5
+representative_docs = 12
+coherence_pass = true
+verify_low_confidence = true
+

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>littax — literature taxonomy</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a">
+<div class="topbar">
+<header class="bar">
+  <div class="brand">
+    <strong>littax</strong>
+    <span class="muted" id="source-root">—</span>
+  </div>
+  <div class="bar-actions">
+    <button id="open-run" class="btn">Analyse a folder…</button>
+    <button id="theme-toggle" class="btn ghost" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+
+<!-- One filter row above everything it scopes; every panel re-renders
+     against the same slice. -->
+<div class="filters" role="group" aria-label="Filters">
+  <label class="field">
+    <span>Level</span>
+    <select id="level-select"></select>
+  </label>
+  <fieldset class="chips">
+    <legend>Confidence</legend>
+    <label><input type="checkbox" value="high" checked><span class="chip band-high">● High</span></label>
+    <label><input type="checkbox" value="medium" checked><span class="chip band-medium">◐ Medium</span></label>
+    <label><input type="checkbox" value="low" checked><span class="chip band-low">○ Low</span></label>
+  </fieldset>
+  <label class="field grow">
+    <span>Search</span>
+    <input id="search" type="search" placeholder="title, author, keyword…">
+  </label>
+  <label class="field">
+    <span>Colour points by</span>
+    <select id="colour-mode">
+      <option value="confidence">Confidence</option>
+      <option value="selection">Selected folder</option>
+    </select>
+  </label>
+  <button id="clear-filters" class="btn ghost">Reset</button>
+</div>
+</div>
+
+<main id="app" hidden>
+  <aside class="panel tree-panel">
+    <h2>Taxonomy</h2>
+    <div id="tree" class="tree" role="tree"></div>
+  </aside>
+
+  <section class="content">
+    <div id="tiles" class="tiles"></div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Embedding space</h2>
+          <p class="muted" id="scatter-sub"></p>
+        </div>
+        <div id="scatter-legend" class="legend"></div>
+      </div>
+      <div id="scatter" class="plot plot-tall"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-head"><h2>Hierarchy</h2></div>
+        <div id="sunburst" class="plot"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Confidence distribution</h2>
+            <p class="muted" id="hist-sub"></p>
+          </div>
+        </div>
+        <div id="histogram" class="plot"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Documents</h2>
+          <p class="muted" id="table-sub">Lowest confidence first — the review queue.</p>
+        </div>
+        <div class="panel-actions">
+          <label class="inline"><input type="checkbox" id="only-flagged"> Needs review only</label>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="doc-table">
+          <thead>
+            <tr>
+              <th data-sort="confidence" class="sortable">Conf.</th>
+              <th data-sort="title" class="sortable">Title</th>
+              <th data-sort="year" class="sortable">Year</th>
+              <th data-sort="folder" class="sortable">Folder</th>
+              <th data-sort="runner" class="sortable">Runner-up</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted" id="table-count"></p>
+    </div>
+  </section>
+</main>
+
+<section id="empty" class="empty">
+  <h1>No analysis yet</h1>
+  <p class="muted">Point littax at a folder of PDFs to discover its topic taxonomy.</p>
+  <button class="btn primary" id="empty-run">Analyse a folder…</button>
+  <p class="muted small" id="empty-hint"></p>
+</section>
+
+<!-- Document detail -->
+<aside id="detail" class="detail" hidden aria-live="polite">
+  <button class="close" id="detail-close" aria-label="Close">×</button>
+  <div id="detail-body"></div>
+</aside>
+
+<!-- Folder picker / run dialog -->
+<dialog id="run-dialog">
+  <form method="dialog">
+    <h2>Choose a folder of PDFs</h2>
+    <div class="path-row">
+      <input id="path-input" type="text" spellcheck="false">
+      <button id="path-go" class="btn" type="button">Go</button>
+    </div>
+    <p class="muted small" id="path-info"></p>
+    <ul id="dir-list" class="dir-list"></ul>
+    <div class="dialog-actions">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn primary" id="start-run" type="button">Run analysis</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="progress" class="progress" hidden>
+  <div class="progress-inner">
+    <h2 id="progress-stage">Working…</h2>
+    <div class="bar-track"><div class="bar-fill" id="progress-fill"></div></div>
+    <p class="muted small" id="progress-detail"></p>
+    <p class="error small" id="progress-error"></p>
+  </div>
+</div>
+
+<script src="/static/vendor/plotly.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

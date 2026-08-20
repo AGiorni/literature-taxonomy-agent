@@ -1,0 +1,33 @@
+# --- never commit someone's library or their credentials --------------------
+# Source corpora. `raw/` is the default; add your own if you point littax
+# elsewhere. These are other people's copyrighted papers - keep them local.
+raw/
+papers/
+library/
+*.pdf
+
+.env
+
+# Personal config. config.example.toml is the one that ships.
+# (Note: git has no inline comments — a trailing comment becomes part of the
+# pattern and silently matches nothing.)
+config.toml
+
+# --- generated --------------------------------------------------------------
+out/
+organised/
+.cache/
+
+# --- python -----------------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# --- editors ----------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store

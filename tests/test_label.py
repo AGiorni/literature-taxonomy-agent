@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from littax.cluster.tree import Node
-from littax.config import LabelConfig
+from littax.config import AzureOpenAICredentials, FoundryCredentials, LabelConfig
 from littax.label.client import (
     MODEL_RATES,
     AzureOpenAILabeller,
@@ -20,6 +20,7 @@ from littax.label.client import (
     _is_unsupported_parameter_error,
     build_labeller,
     extract_json,
+    probe_labeller,
     supports_adaptive_thinking,
 )
 from littax.label.prompts import COHERENCE_SYSTEM, NAMING_SYSTEM, VERIFY_SYSTEM
@@ -140,6 +141,74 @@ class TestProviderSelection:
         monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/")
         azure = build_labeller(LabelConfig(provider="azure-openai", model="gpt-4o"), tmp_path)
         assert "azure-openai" in str(azure.cache.dir)
+
+
+class TestSuppliedCredentials:
+    """The viewer collects credentials in a form; they must not need the env."""
+
+    def test_explicit_credentials_bypass_the_environment(self, tmp_path, monkeypatch):
+        for name in ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+            monkeypatch.delenv(name, raising=False)
+        labeller = build_labeller(
+            LabelConfig(provider="azure-openai", model="gpt-4o"),
+            tmp_path,
+            AzureOpenAICredentials(
+                api_key="typed-in-the-browser",
+                endpoint="https://example.openai.azure.com/",
+            ),
+        )
+        assert isinstance(labeller, AzureOpenAILabeller)
+
+    def test_foundry_takes_them_too(self, tmp_path, monkeypatch):
+        for name in ("ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_RESOURCE"):
+            monkeypatch.delenv(name, raising=False)
+        labeller = build_labeller(
+            LabelConfig(provider="foundry", model="claude-opus-5"),
+            tmp_path,
+            FoundryCredentials(api_key="k", resource="my-resource"),
+        )
+        assert isinstance(labeller, FoundryLabeller)
+
+    def test_a_bad_endpoint_is_still_explained(self, tmp_path, monkeypatch):
+        """The operation-URL mix-up must be caught however it arrives."""
+        monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+        with pytest.raises(LabellingUnavailable, match="resource base URL"):
+            build_labeller(
+                LabelConfig(provider="azure-openai"),
+                tmp_path,
+                AzureOpenAICredentials(
+                    api_key="k",
+                    endpoint="https://x.services.ai.azure.com/openai/v1/responses",
+                ),
+            )
+
+
+class TestProbeLabeller:
+    def test_a_configuration_problem_becomes_a_result(self, tmp_path, monkeypatch):
+        """Callers render the reason; they should not have to catch it."""
+        for name in ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+            monkeypatch.delenv(name, raising=False)
+        result = probe_labeller(LabelConfig(provider="azure-openai"), tmp_path)
+        assert result["ok"] is False
+        assert "AZURE_OPENAI_API_KEY" in result["reason"]
+        assert result["deployments"] == []
+
+    def test_deployments_are_opt_in(self, tmp_path, monkeypatch):
+        """doctor should not pay for a second round trip it does not use."""
+        monkeypatch.setattr(
+            "littax.label.client.build_labeller",
+            lambda *a, **k: SimpleNamespace(
+                probe=lambda: {"ok": True, "requested": "gpt-4o", "served": "gpt-4o",
+                               "matches": True},
+                list_deployments=lambda: ["gpt-4o", "gpt-4o-mini"],
+            ),
+        )
+        cfg = LabelConfig(provider="azure-openai", model="gpt-4o")
+        assert probe_labeller(cfg, tmp_path)["deployments"] == []
+        assert probe_labeller(cfg, tmp_path, deployments=True)["deployments"] == [
+            "gpt-4o",
+            "gpt-4o-mini",
+        ]
 
 
 class TestAzureRequestShaping:

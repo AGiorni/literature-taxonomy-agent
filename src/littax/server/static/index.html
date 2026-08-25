@@ -22,10 +22,6 @@
 <!-- One filter row above everything it scopes; every panel re-renders
      against the same slice. -->
 <div class="filters" role="group" aria-label="Filters">
-  <label class="field">
-    <span>Level</span>
-    <select id="level-select"></select>
-  </label>
   <fieldset class="chips">
     <legend>Confidence</legend>
     <label><input type="checkbox" value="high" checked><span class="chip band-high">● High</span></label>
@@ -35,13 +31,6 @@
   <label class="field grow">
     <span>Search</span>
     <input id="search" type="search" placeholder="title, author, keyword…">
-  </label>
-  <label class="field">
-    <span>Colour points by</span>
-    <select id="colour-mode">
-      <option value="confidence">Confidence</option>
-      <option value="selection">Selected folder</option>
-    </select>
   </label>
   <button id="clear-filters" class="btn ghost">Reset</button>
 </div>
@@ -62,8 +51,22 @@
           <h2>Embedding space</h2>
           <p class="muted" id="scatter-sub"></p>
         </div>
-        <div id="scatter-legend" class="legend"></div>
+        <div class="plot-controls">
+          <label class="field">
+            <span>Group by</span>
+            <select id="level-select"></select>
+          </label>
+          <label class="field">
+            <span>Colour by</span>
+            <select id="colour-mode">
+              <option value="folder">Folder</option>
+              <option value="confidence">Confidence</option>
+              <option value="selection">Selected folder</option>
+            </select>
+          </label>
+        </div>
       </div>
+      <div id="scatter-legend" class="legend"></div>
       <div id="scatter" class="plot plot-tall"></div>
     </div>
 
@@ -125,20 +128,90 @@
   <div id="detail-body"></div>
 </aside>
 
-<!-- Folder picker / run dialog -->
+<!-- Folder picker / run wizard: three steps, one dialog. -->
 <dialog id="run-dialog">
   <form method="dialog">
-    <h2>Choose a folder of PDFs</h2>
-    <div class="path-row">
-      <input id="path-input" type="text" spellcheck="false">
-      <button id="path-go" class="btn" type="button">Go</button>
-    </div>
-    <p class="muted small" id="path-info"></p>
-    <ul id="dir-list" class="dir-list"></ul>
-    <div class="dialog-actions">
-      <button class="btn ghost" value="cancel">Cancel</button>
-      <button class="btn primary" id="start-run" type="button">Run analysis</button>
-    </div>
+
+    <!-- Step 1: which folder -->
+    <section class="step" id="step-folder">
+      <h2>Choose a folder of PDFs</h2>
+      <div class="path-row">
+        <input id="path-input" type="text" spellcheck="false">
+        <button id="path-go" class="btn" type="button">Go</button>
+      </div>
+      <p class="muted small" id="path-info"></p>
+      <ul id="dir-list" class="dir-list"></ul>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="btn ghost" id="reanalyse" type="button" hidden>Re-analyse…</button>
+        <button class="btn primary" id="folder-next" type="button">Continue →</button>
+      </div>
+    </section>
+
+    <!-- Step 2: with or without the LLM -->
+    <section class="step" id="step-mode" hidden>
+      <h2>How should folders be named?</h2>
+      <p class="muted small" id="mode-source"></p>
+      <p class="banner error small" id="mode-blocked" hidden></p>
+
+      <div class="cards">
+        <label class="card" for="mode-standard">
+          <input type="radio" name="mode" id="mode-standard" value="standard" checked>
+          <strong>Standard</strong>
+          <span class="muted small">Names come from each cluster's distinctive
+            terms. No API calls, no key needed.</span>
+        </label>
+        <label class="card" for="mode-ai" id="mode-ai-card">
+          <input type="radio" name="mode" id="mode-ai" value="ai">
+          <strong>AI-assisted</strong>
+          <span class="muted small">An LLM writes the folder names and
+            descriptions, and reviews the tree for coherence. Needs a provider
+            and bills per call.</span>
+          <span class="muted small" id="mode-ai-blocked" hidden></span>
+        </label>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="btn ghost" id="mode-back" type="button">← Back</button>
+        <button class="btn primary" id="mode-next" type="button">Continue →</button>
+      </div>
+    </section>
+
+    <!-- Step 3: provider and credentials -->
+    <section class="step" id="step-llm" hidden>
+      <h2>Connect a model</h2>
+      <div class="cards" id="provider-cards"></div>
+
+      <div id="provider-fields"></div>
+
+      <label class="field">
+        <span>Model</span>
+        <input id="llm-model" type="text" spellcheck="false">
+      </label>
+
+      <label class="field" id="deployment-field" hidden>
+        <span>Deployment <span class="muted">— chosen when you deployed; often
+          differs from the model id</span></span>
+        <input id="llm-deployment" type="text" spellcheck="false" list="deployment-options">
+        <datalist id="deployment-options"></datalist>
+      </label>
+
+      <div class="test-row">
+        <button class="btn" id="llm-test" type="button">Test connection</button>
+        <span class="small" id="llm-test-result"></span>
+      </div>
+
+      <label class="checkbox">
+        <input type="checkbox" id="llm-remember">
+        <span>Remember on this machine <span class="muted small" id="env-path"></span></span>
+      </label>
+
+      <div class="dialog-actions">
+        <button class="btn ghost" id="llm-back" type="button">← Back</button>
+        <button class="btn primary" id="start-run" type="button">Start analysis</button>
+      </div>
+    </section>
+
   </form>
 </dialog>
 
@@ -148,6 +221,9 @@
     <div class="bar-track"><div class="bar-fill" id="progress-fill"></div></div>
     <p class="muted small" id="progress-detail"></p>
     <p class="error small" id="progress-error"></p>
+    <div class="dialog-actions">
+      <button class="btn ghost" id="progress-dismiss" type="button" hidden>Close</button>
+    </div>
   </div>
 </div>
 

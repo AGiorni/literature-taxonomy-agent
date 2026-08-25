@@ -16,7 +16,7 @@ const state = {
   level: 0,            // 0 = all levels
   bands: new Set(["high", "medium", "low"]),
   search: "",
-  colourMode: "confidence",
+  colourMode: "folder",
   onlyFlagged: false,
   sort: { key: "confidence", dir: 1 },
   expanded: new Set(),
@@ -92,6 +92,68 @@ function folderPathOf(doc) {
 
 const SEQ = () => [css("--seq-1"), css("--seq-2"), css("--seq-3"), css("--seq-4"), css("--seq-5")];
 
+/* Categorical slots, in fixed order — assigned to entities, never cycled.
+ *
+ * Three, not eight. A scatter can put any two colours side by side, so it is
+ * judged on all pairs rather than adjacent ones, and only the first three slots
+ * of the palette clear the colourblind and normal-vision floors that way
+ * (verified with the palette validator: a 4th slot fails in one mode or the
+ * other — violet collides with blue under protanopia on the dark surface,
+ * yellow with orange in light). Everything past the top three folds into
+ * "Other", and the centroid labels carry identity for the rest. */
+const CATEGORICAL = () => [css("--series-1"), css("--series-2"), css("--series-3")];
+const UNSORTED_ID = "_unsorted";
+
+/* Shape is the second channel. Three validated hues alone cap the chart at
+ * three folders, which a real level-1 taxonomy already exceeds; pairing each
+ * hue with a marker shape lifts that to nine without weakening a single colour
+ * pair, because any two groups now differ in hue OR in shape. Glyphs mirror the
+ * plot symbols in the legend. */
+const SYMBOLS = ["circle", "diamond", "square"];
+const SYMBOL_GLYPH = { circle: "●", diamond: "◆", square: "■" };
+
+/** Folders at `level`, biggest first, each given a colour+shape pair.
+ *  Returns the assignment plus the legend it implies. */
+function folderColouring(docs, level) {
+  const counts = new Map();
+  for (const doc of docs) {
+    const id = ancestorAtLevel(doc.assignment.folder_id, level);
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+
+  // _Unsorted is a residue, not a topic: it never earns one of three slots.
+  const ranked = [...counts.entries()]
+    .filter(([id]) => id !== UNSORTED_ID)
+    .sort((a, b) => b[1] - a[1]);
+
+  const hues = CATEGORICAL();
+  const capacity = hues.length * SYMBOLS.length;
+  const styleOf = new Map();
+  ranked.slice(0, capacity).forEach(([id], i) =>
+    styleOf.set(id, {
+      colour: hues[i % hues.length],
+      symbol: SYMBOLS[Math.floor(i / hues.length)],
+    })
+  );
+
+  const other = { colour: css("--muted"), symbol: "circle" };
+  const legend = ranked.slice(0, capacity).map(([id, n]) => ({
+    label: state.folders.get(id)?.label ?? id,
+    ...styleOf.get(id),
+    n,
+  }));
+
+  const spilled = ranked.slice(capacity);
+  const restCount = spilled.reduce((sum, [, n]) => sum + n, 0);
+  const unsorted = counts.get(UNSORTED_ID) || 0;
+  if (restCount) {
+    legend.push({ label: `Other (${spilled.length} folders)`, ...other, n: restCount });
+  }
+  if (unsorted) legend.push({ label: "Unsorted", ...other, n: unsorted });
+
+  return { styleOf, other, legend };
+}
+
 /** Sequential ramp as Plotly colorscale stops — one hue, light to dark. */
 function seqScale() {
   const steps = SEQ();
@@ -138,7 +200,9 @@ function drawScatter() {
     return;
   }
 
-  const level = state.level || 1;
+  // 0 means "the leaf each document was actually assigned to"; ancestorAtLevel
+  // walks past the root and hands the original id back.
+  const level = state.level;
   const scopeIds = state.selected ? subtreeIds(state.selected) : null;
   const x = docs.map((d) => d.coords.global[0]);
   const y = docs.map((d) => d.coords.global[1]);
@@ -149,7 +213,26 @@ function drawScatter() {
   );
 
   let marker;
-  if (state.colourMode === "selection" && scopeIds) {
+  if (state.colourMode === "folder") {
+    const { styleOf, other, legend: groups } = folderColouring(docs, level);
+    const styles = docs.map(
+      (d) => styleOf.get(ancestorAtLevel(d.assignment.folder_id, level)) || other
+    );
+    marker = {
+      size: 9,
+      color: styles.map((v) => v.colour),
+      symbol: styles.map((v) => v.symbol),
+      opacity: 0.85,
+      line: { width: 2, color: css("--surface-1") },
+    };
+    legend.innerHTML = groups
+      .map(
+        (g) =>
+          `<span><span class="glyph" style="color:${g.colour}">${SYMBOL_GLYPH[g.symbol]}</span>` +
+          `${escapeHtml(truncate(g.label, 34))} <span class="muted">${g.n}</span></span>`
+      )
+      .join("");
+  } else if (state.colourMode === "selection" && scopeIds) {
     // Two colours only: the selected branch against everything else.
     marker = {
       size: 9,
@@ -194,29 +277,55 @@ function drawScatter() {
     acc.y += doc.coords.global[1];
     acc.n += 1;
   }
-  const labels = [...centroids.entries()]
+  // Biggest first, so when two centroids collide the label that survives is the
+  // one describing more documents.
+  const ranked = [...centroids.entries()]
     .filter(([, acc]) => acc.n >= 3)
     .sort((a, b) => b[1].n - a[1].n)
-    .slice(0, 12);
+    .map(([id, acc]) => ({ id, x: acc.x / acc.n, y: acc.y / acc.n, n: acc.n }));
 
-  traces.push({
-    type: "scatter", mode: "text",
-    x: labels.map(([, a]) => a.x / a.n),
-    y: labels.map(([, a]) => a.y / a.n),
-    text: labels.map(([id]) => truncate(state.folders.get(id)?.label ?? id, 28)),
-    textfont: { size: 11, color: css("--text-primary") },
-    hoverinfo: "skip",
-  });
+  // Drop labels that would land on top of one another. Plotly does not
+  // declutter annotations, and overlapping boxes are less readable than fewer.
+  const spanX = Math.max(...x) - Math.min(...x) || 1;
+  const spanY = Math.max(...y) - Math.min(...y) || 1;
+  const placed = [];
+  for (const candidate of ranked) {
+    const clash = placed.some(
+      (p) =>
+        Math.abs(p.x - candidate.x) < spanX * 0.16 &&
+        Math.abs(p.y - candidate.y) < spanY * 0.07
+    );
+    if (!clash) placed.push(candidate);
+    if (placed.length === 10) break;
+  }
+
+  // Annotations rather than a text trace: they render in the SVG layer above
+  // the WebGL markers, and they take a background, so a name is readable over a
+  // dense cluster instead of disappearing into it. Full label, no truncation -
+  // reading the name is the whole point of the layer.
+  const annotations = placed.map((p) => ({
+    x: p.x, y: p.y,
+    text: escapeHtml(state.folders.get(p.id)?.label ?? p.id),
+    showarrow: false,
+    font: { size: 12, color: css("--text-primary") },
+    bgcolor: css("--surface-1"),
+    bordercolor: css("--border"),
+    borderwidth: 1,
+    borderpad: 4,
+    opacity: 0.92,
+    captureevents: false,
+  }));
 
   const layout = baseLayout({
     hovermode: "closest",
     xaxis: { visible: false }, yaxis: { visible: false },
     margin: { l: 8, r: 8, t: 8, b: 8 },
+    annotations,
   });
 
   Plotly.react("scatter", traces, layout, PLOT_CONFIG);
-  sub.textContent =
-    `${docs.length} documents · UMAP projection · labels mark level-${level} folders`;
+  const grouping = level === 0 ? "assigned folders" : `level-${level} folders`;
+  sub.textContent = `${docs.length} documents · UMAP projection · labels mark ${grouping}`;
 
   const node = $("#scatter");
   node.removeAllListeners?.("plotly_click");
@@ -342,6 +451,43 @@ function drawTiles() {
 
 /* ----------------------------------------------------------------- tree --- */
 
+/* ---- folder name tooltip --------------------------------------------------
+ * .node-label truncates in a narrow sidebar, so the full name is unreadable
+ * without one. Built lazily and attached to <body>: .tree is a scroll
+ * container, and a tip inside it would be clipped at the panel edge - exactly
+ * where a long name needs to escape to.                                     */
+
+let nodeTip = null;
+
+function hideNodeTip() {
+  if (nodeTip) nodeTip.hidden = true;
+}
+
+function showNodeTip(row, folder) {
+  if (!nodeTip) {
+    nodeTip = document.createElement("div");
+    nodeTip.className = "node-tip";
+    document.body.appendChild(nodeTip);
+    // A tip anchored to a row that has scrolled away is worse than none.
+    addEventListener("scroll", hideNodeTip, true);
+  }
+  nodeTip.innerHTML =
+    escapeHtml(folder.label) +
+    (folder.description ? `<span class="tip-desc">${escapeHtml(folder.description)}</span>` : "");
+  nodeTip.hidden = false;
+
+  // Measure after filling, then keep it inside the viewport: flip above the
+  // row when there is no room below, and pull left when it would run off.
+  const anchor = row.getBoundingClientRect();
+  const tip = nodeTip.getBoundingClientRect();
+  const left = Math.max(8, Math.min(anchor.left, innerWidth - tip.width - 8));
+  const below = anchor.bottom + 6;
+  const top = below + tip.height > innerHeight - 8 ? anchor.top - tip.height - 6 : below;
+
+  nodeTip.style.left = `${left}px`;
+  nodeTip.style.top = `${Math.max(8, top)}px`;
+}
+
 function drawTree() {
   const container = $("#tree");
   container.innerHTML = "";
@@ -364,7 +510,8 @@ function drawTree() {
       const row = document.createElement("div");
       row.className = "node-row";
       row.setAttribute("aria-selected", String(state.selected === folder.id));
-      row.title = folder.description || folder.label;
+      row.onmouseenter = () => showNodeTip(row, folder);
+      row.onmouseleave = hideNodeTip;
       row.innerHTML = `
         <button class="twisty${children.length ? "" : " leaf"}" aria-label="Toggle">${isOpen ? "▼" : "▶"}</button>
         <span class="node-label">${escapeHtml(folder.label)}</span>
@@ -505,7 +652,8 @@ function escapeHtml(text) {
 /* ---------------------------------------------------------------- wiring -- */
 
 function wireFilters() {
-  $("#level-select").onchange = (e) => { state.level = Number(e.target.value); render(); };
+  // Scatter-only: grouping changes the plot's colours and labels, nothing else.
+  $("#level-select").onchange = (e) => { state.level = Number(e.target.value); drawScatter(); };
   $("#search").oninput = (e) => { state.search = e.target.value; render(); };
   $("#colour-mode").onchange = (e) => { state.colourMode = e.target.value; drawScatter(); };
   $("#only-flagged").onchange = (e) => { state.onlyFlagged = e.target.checked; render(); };
@@ -524,7 +672,6 @@ function wireFilters() {
     state.onlyFlagged = false;
     state.bands = new Set(["high", "medium", "low"]);
     $("#search").value = "";
-    $("#level-select").value = "0";
     $("#only-flagged").checked = false;
     for (const input of document.querySelectorAll(".chips input")) input.checked = true;
     render();
@@ -560,26 +707,61 @@ function wireTheme() {
 
 /* ------------------------------------------------------------ run dialog -- */
 
+/** The wizard's own state, separate from the viewer's. */
+const setup = {
+  config: null,      // /api/config
+  providers: [],     // /api/providers
+  provider: null,    // the selected provider descriptor
+  hasTaxonomy: false, // does the selected folder already hold one?
+};
+
 function wireRunDialog() {
   const dialog = $("#run-dialog");
+
+  function showStep(id) {
+    for (const section of document.querySelectorAll("#run-dialog .step")) {
+      section.hidden = section.id !== id;
+    }
+  }
+
   const open = async () => {
-    dialog.showModal();
-    const config = await fetch("/api/config").then((r) => r.json());
-    $("#path-input").value = config.source_root;
-    await browse(config.source_root);
+    showStep("step-folder");
+    if (!dialog.open) dialog.showModal();
+    const [config, providers] = await Promise.all([
+      fetch("/api/config").then((r) => r.json()),
+      fetch("/api/providers").then((r) => r.json()).catch(() => ({ providers: [] })),
+    ]);
+    setup.config = config;
+    setup.providers = providers.providers || [];
+    $("#env-path").textContent = `— writes to ${config.env_file}`;
+    await browse(config.project_source || config.source_root);
   };
   $("#open-run").onclick = open;
   $("#empty-run").onclick = open;
+
+  /* ---- step 1: folder ---- */
 
   async function browse(path) {
     try {
       const data = await fetch(`/api/browse?path=${encodeURIComponent(path)}`).then((r) => r.json());
       $("#path-input").value = data.path;
-      $("#path-info").textContent = `${data.pdf_count} PDF${data.pdf_count === 1 ? "" : "s"} directly in this folder`;
+      setup.hasTaxonomy = data.has_taxonomy;
+
+      const count = `${data.pdf_count} PDF${data.pdf_count === 1 ? "" : "s"} directly in this folder`;
+      $("#path-info").textContent = data.has_taxonomy
+        ? `${count} · already analysed`
+        : count;
+
+      // An analysed folder offers its result first; re-running is the
+      // secondary action, since it costs minutes and possibly money.
+      $("#folder-next").textContent = data.has_taxonomy ? "Open taxonomy" : "Continue →";
+      $("#reanalyse").hidden = !data.has_taxonomy;
+
       const items = [];
       if (data.parent) items.push(`<li data-path="${escapeHtml(data.parent)}">↑ ..</li>`);
       for (const dir of data.directories) {
-        items.push(`<li data-path="${escapeHtml(dir.path)}">📁 ${escapeHtml(dir.name)}</li>`);
+        const tag = dir.has_taxonomy ? `<span class="tag">✓ analysed</span>` : "";
+        items.push(`<li data-path="${escapeHtml(dir.path)}">📁 ${escapeHtml(dir.name)}${tag}</li>`);
       }
       $("#dir-list").innerHTML = items.join("");
       for (const li of document.querySelectorAll("#dir-list li")) {
@@ -591,20 +773,200 @@ function wireRunDialog() {
   }
 
   $("#path-go").onclick = () => browse($("#path-input").value);
-  $("#start-run").onclick = async () => {
-    const source = $("#path-input").value;
+
+  $("#folder-next").onclick = async () => {
+    if (!setup.hasTaxonomy) return toMode();
+    const response = await fetch("/api/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: $("#path-input").value }),
+    });
+    if (response.ok) {
+      dialog.close();
+      load();
+    } else {
+      $("#path-info").textContent = "Could not open that taxonomy.";
+    }
+  };
+  $("#reanalyse").onclick = () => toMode();
+
+  /* ---- step 2: mode ---- */
+
+  function toMode() {
+    const blocked = setup.config?.missing || [];
+    $("#mode-source").textContent = $("#path-input").value;
+
+    // No lesser path exists, so a missing dependency stops here rather than
+    // starting a run that cannot finish.
+    $("#mode-blocked").hidden = blocked.length === 0;
+    $("#mode-blocked").textContent = blocked.length
+      ? `Cannot run yet — install first: ${blocked.join("; ")}`
+      : "";
+
+    const llmBlocked = setup.config?.missing_for_llm || [];
+    const llmOnly = llmBlocked.filter((cmd) => !blocked.includes(cmd));
+    $("#mode-ai").disabled = llmOnly.length > 0 || blocked.length > 0;
+    $("#mode-ai-blocked").hidden = llmOnly.length === 0;
+    $("#mode-ai-blocked").textContent = llmOnly.length ? `Install first: ${llmOnly.join("; ")}` : "";
+    if ($("#mode-ai").disabled) $("#mode-standard").checked = true;
+
+    syncModeButton();
+    showStep("step-mode");
+  }
+
+  function syncModeButton() {
+    const ai = $("#mode-ai").checked;
+    $("#mode-next").textContent = ai ? "Continue →" : "Start analysis";
+    $("#mode-next").disabled = (setup.config?.missing || []).length > 0;
+  }
+  $("#mode-standard").onchange = syncModeButton;
+  $("#mode-ai").onchange = syncModeButton;
+  $("#mode-back").onclick = () => showStep("step-folder");
+  $("#mode-next").onclick = () => ($("#mode-ai").checked ? toProvider() : startRun(false));
+
+  /* ---- step 3: provider ---- */
+
+  function toProvider() {
+    const usable = setup.providers.filter((p) => p.sdk_installed);
+    const chosen = setup.provider || usable.find((p) => p.env_ready) || usable[0];
+    $("#provider-cards").innerHTML = setup.providers
+      .map(
+        (p) => `<label class="card" for="prov-${p.id}">
+          <input type="radio" name="provider" id="prov-${p.id}" value="${p.id}"
+            ${p.id === chosen?.id ? "checked" : ""} ${p.sdk_installed ? "" : "disabled"}>
+          <strong>${escapeHtml(p.name)}</strong>
+          <span class="muted small">${
+            p.sdk_installed
+              ? p.env_ready
+                ? "Credentials found on this machine"
+                : "Needs an endpoint and key"
+              : "SDK not installed — uv sync --extra llm"
+          }</span>
+        </label>`
+      )
+      .join("");
+    for (const input of document.querySelectorAll('#provider-cards input')) {
+      input.onchange = () => selectProvider(input.value);
+    }
+    selectProvider(chosen?.id);
+    showStep("step-llm");
+  }
+
+  function selectProvider(id) {
+    const provider = setup.providers.find((p) => p.id === id);
+    setup.provider = provider;
+    if (!provider) return;
+
+    $("#provider-fields").innerHTML = provider.fields
+      .map(
+        (f) => `<label class="field">
+          <span>${escapeHtml(f.label)}</span>
+          <input id="cred-${f.id}" type="${f.secret ? "password" : "text"}"
+            spellcheck="false" placeholder="${escapeHtml(f.placeholder || "")}"
+            autocomplete="off">
+        </label>`
+      )
+      .join("");
+    $("#llm-model").value = provider.default_model;
+    $("#deployment-field").hidden = !provider.needs_deployment;
+    if (provider.needs_deployment) $("#llm-deployment").value = provider.default_model;
+    $("#llm-test-result").textContent = provider.env_ready
+      ? "Credentials already on this machine — leave blank to use them."
+      : "";
+    $("#llm-test-result").className = "small muted";
+    for (const input of document.querySelectorAll("#provider-fields input")) {
+      input.oninput = syncStartButton;
+    }
+    syncStartButton();
+  }
+
+  /** Credentials as the server expects them; blank means "use the environment". */
+  function credentials() {
+    const values = { api_key: "", endpoint: "", resource: "" };
+    for (const field of setup.provider?.fields || []) {
+      values[field.id] = $(`#cred-${field.id}`)?.value.trim() || "";
+    }
+    return values;
+  }
+
+  function llmSettings() {
+    return {
+      provider: setup.provider?.id,
+      model: $("#llm-model").value.trim() || null,
+      deployment: setup.provider?.needs_deployment
+        ? $("#llm-deployment").value.trim() || null
+        : null,
+      credentials: credentials(),
+    };
+  }
+
+  function syncStartButton() {
+    const values = credentials();
+    const filled = (setup.provider?.fields || []).every((f) => values[f.id]);
+    // Blank fields are fine when the environment already holds the pair.
+    $("#start-run").disabled = !filled && !setup.provider?.env_ready;
+  }
+
+  $("#llm-back").onclick = () => showStep("step-mode");
+
+  $("#llm-test").onclick = async () => {
+    const result = $("#llm-test-result");
+    result.className = "small muted";
+    result.textContent = "Testing…";
+    const response = await fetch("/api/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(llmSettings()),
+    }).then((r) => r.json()).catch(() => ({ ok: false, reason: "Could not reach the server." }));
+
+    if (response.deployments?.length) {
+      $("#deployment-options").innerHTML = response.deployments
+        .map((d) => `<option value="${escapeHtml(d)}"></option>`)
+        .join("");
+    }
+    if (!response.ok) {
+      result.className = "small error";
+      result.textContent = response.reason || "Failed.";
+    } else if (!response.matches) {
+      // Worse than a failure: the run would succeed and bill at another rate.
+      result.className = "small error";
+      result.textContent = `Requested ${response.requested} but ${response.served} replied.`;
+    } else {
+      result.className = "small ok";
+      result.textContent = `✓ ${response.served} answered`;
+    }
+  };
+
+  $("#start-run").onclick = () => startRun(true);
+
+  async function startRun(aiAssisted) {
+    const body = { source: $("#path-input").value, ai_assisted: aiAssisted };
+    if (aiAssisted) {
+      body.llm = llmSettings();
+      body.remember = $("#llm-remember").checked;
+    }
     dialog.close();
     $("#progress").hidden = false;
+    $("#progress-stage").textContent = "Working…";
     $("#progress-error").textContent = "";
+    $("#progress-dismiss").hidden = true;
+
     const response = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      $("#progress-error").textContent = body.detail || "Could not start the run.";
+      const payload = await response.json().catch(() => ({}));
+      $("#progress-stage").textContent = "Cannot start";
+      $("#progress-error").textContent = payload.detail || "Could not start the run.";
+      $("#progress-dismiss").hidden = false;
     }
+  }
+
+  $("#progress-dismiss").onclick = async () => {
+    $("#progress").hidden = true;
+    await fetch("/api/dismiss", { method: "POST" }).catch(() => {});
   };
 }
 
@@ -618,6 +980,7 @@ function wireProgress() {
 
     if (p.status === "running") {
       $("#progress").hidden = false;
+      $("#progress-dismiss").hidden = true;
       $("#progress-stage").textContent = p.stage || "Working…";
       $("#progress-detail").textContent = p.detail || "";
       $("#progress-fill").style.width = `${Math.round((p.done / Math.max(p.total, 1)) * 100)}%`;
@@ -625,6 +988,7 @@ function wireProgress() {
       $("#progress").hidden = false;
       $("#progress-stage").textContent = "Failed";
       $("#progress-error").textContent = p.error || "";
+      $("#progress-dismiss").hidden = false;
     } else if (p.status === "done" && p.version !== lastVersion) {
       lastVersion = p.version;
       $("#progress").hidden = true;
@@ -635,22 +999,31 @@ function wireProgress() {
 
 /* ----------------------------------------------------------------- boot --- */
 
-async function load() {
+async function load(openPickerIfEmpty = false) {
   const response = await fetch("/api/state");
   if (!response.ok) {
     $("#empty").hidden = false;
     $("#app").hidden = true;
     const config = await fetch("/api/config").then((r) => r.json()).catch(() => null);
     if (config) $("#empty-hint").textContent = `Configured source: ${config.source_root}`;
+    // Nothing to look at yet, so go straight to choosing a folder rather than
+    // making the first click a formality.
+    if (openPickerIfEmpty) $("#empty-run").click();
     return;
   }
   indexTaxonomy(await response.json());
 
+  // "Leaf" is level 0 - the folder each document is actually assigned to, which
+  // is a genuinely different grouping from level 1, not a synonym for "all".
   const levels = state.taxonomy.stats.levels;
   $("#level-select").innerHTML =
-    `<option value="0">All</option>` +
-    Array.from({ length: levels }, (_, i) => `<option value="${i + 1}">Level ${i + 1}</option>`).join("");
+    Array.from({ length: levels }, (_, i) => `<option value="${i + 1}">Level ${i + 1}</option>`).join("") +
+    `<option value="0">Leaf (as assigned)</option>`;
+  // Level 1 is the readable default: the deeper the grouping, the more folders
+  // collapse into "Other".
+  if (state.level === 0) state.level = 1;
   $("#level-select").value = String(state.level);
+  $("#colour-mode").value = state.colourMode;
   $("#source-root").textContent = state.taxonomy.source_root;
 
   $("#empty").hidden = true;
@@ -672,4 +1045,4 @@ wireRunDialog();
 wireProgress();
 syncTopbarHeight();
 addEventListener("resize", syncTopbarHeight);
-load();
+load(true);

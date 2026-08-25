@@ -13,7 +13,8 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.tree import Tree
 
-from littax.config import Config, credentials_for
+from littax.capabilities import SDK_FOR_PROVIDER, probe_capabilities
+from littax.config import PROJECT_DIR, Config, credentials_for
 from littax.env import load_env, loaded_from, present_keys
 from littax.models import Taxonomy
 
@@ -70,29 +71,27 @@ def doctor(
     except ImportError as exc:
         record("pymupdf", False, str(exc))
 
+    record("project", True, f"taxonomy.json in {cfg.out}", fatal=False)
+
+    installed = probe_capabilities()
+
     if cfg.embed.backend == "tfidf":
         record("embedding backend", True, "tfidf (no download required)", fatal=False)
+    elif installed["sentence_transformers"]:
+        record("embedding backend", True, f"{cfg.embed.backend} via sentence-transformers")
     else:
-        try:
-            import sentence_transformers  # noqa: F401
+        record(
+            "embedding backend",
+            False,
+            f"backend '{cfg.embed.backend}' needs: uv sync --extra ml",
+        )
 
-            record("embedding backend", True, f"{cfg.embed.backend} via sentence-transformers")
-        except ImportError:
-            record(
-                "embedding backend",
-                False,
-                f"backend '{cfg.embed.backend}' needs: uv sync --extra ml",
-            )
-
-    if cfg.cluster.reducer == "umap":
-        try:
-            import umap  # noqa: F401
-
-            record("umap", True, "installed")
-        except ImportError:
-            record("umap", False, "reducer='umap' needs: uv sync --extra ml")
-    else:
+    if cfg.cluster.reducer != "umap":
         record("umap", True, f"not needed (reducer={cfg.cluster.reducer})", fatal=False)
+    elif installed["umap"]:
+        record("umap", True, "installed")
+    else:
+        record("umap", False, "reducer='umap' needs: uv sync --extra ml")
 
     if cfg.label.enabled:
         from littax.label.client import (
@@ -163,20 +162,17 @@ def doctor(
                     or getattr(credentials, "endpoint", ""),
                 )
 
-        sdk = "anthropic" if provider == "foundry" else "openai"
-        try:
-            __import__(sdk)
-            record(f"{sdk} sdk", True, "installed")
-        except ImportError:
-            record(f"{sdk} sdk", False, "needs: uv sync --extra llm")
+        sdk = SDK_FOR_PROVIDER.get(provider, "openai")
+        record(
+            f"{sdk} sdk",
+            installed.get(sdk, False),
+            "installed" if installed.get(sdk) else "needs: uv sync --extra llm",
+        )
 
         if probe and credentials:
-            from littax.label.client import LabellingUnavailable, build_labeller
+            from littax.label.client import probe_labeller
 
-            try:
-                result = build_labeller(cfg.label, cfg.cache_dir).probe()
-            except LabellingUnavailable as exc:
-                result = {"ok": False, "reason": str(exc)}
+            result = probe_labeller(cfg.label, cfg.cache_dir)
 
             if not result["ok"]:
                 record("model deployed", False, result["reason"][:160])
@@ -214,7 +210,7 @@ def run(
     config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
     out: Annotated[Optional[Path], typer.Option("--out", "-o")] = None,
 ) -> None:
-    """Discover the taxonomy and write out/taxonomy.json."""
+    """Discover the taxonomy and write <source>/littax/taxonomy.json."""
     from littax.pipeline import run as run_pipeline, write_taxonomy
 
     cfg = _load_config(config, source)
@@ -242,7 +238,7 @@ def run(
 
         taxonomy = run_pipeline(cfg, report)
 
-    path = write_taxonomy(taxonomy, cfg.out_dir)
+    path = write_taxonomy(taxonomy, cfg.out)
     _print_summary(taxonomy)
     console.print(f"\nwrote [bold]{path}[/]")
 
@@ -268,9 +264,22 @@ def serve(
     run_server(cfg, port=port)
 
 
+def _resolve_taxonomy(path: Optional[Path]) -> Path:
+    """Find taxonomy.json when the user did not name one.
+
+    Prefers the current project layout, <cwd>/littax/, and falls back to the
+    legacy out/ so a working tree built before the move keeps working.
+    """
+    if path is not None:
+        return path
+    project = Path(PROJECT_DIR) / "taxonomy.json"
+    legacy = Path("out") / "taxonomy.json"
+    return legacy if not project.exists() and legacy.exists() else project
+
+
 @app.command()
 def apply(
-    taxonomy_path: Annotated[Path, typer.Argument()] = Path("out/taxonomy.json"),
+    taxonomy_path: Annotated[Optional[Path], typer.Argument()] = None,
     mode: Annotated[str, typer.Option("--mode", help="dry-run|hardlink|copy|move")] = "dry-run",
     min_confidence: Annotated[float, typer.Option("--min-confidence")] = 0.0,
     target: Annotated[Optional[Path], typer.Option("--target")] = None,
@@ -278,6 +287,7 @@ def apply(
     """Execute the reorganisation plan. Defaults to a dry run."""
     from littax.apply import apply_plan
 
+    taxonomy_path = _resolve_taxonomy(taxonomy_path)
     taxonomy = Taxonomy.model_validate_json(taxonomy_path.read_text(encoding="utf-8"))
     result = apply_plan(
         taxonomy,
@@ -298,10 +308,11 @@ def apply(
 
 @app.command("show")
 def show(
-    taxonomy_path: Annotated[Path, typer.Argument()] = Path("out/taxonomy.json"),
+    taxonomy_path: Annotated[Optional[Path], typer.Argument()] = None,
     max_depth: Annotated[int, typer.Option("--depth")] = 3,
 ) -> None:
     """Print the discovered hierarchy from an existing taxonomy.json."""
+    taxonomy_path = _resolve_taxonomy(taxonomy_path)
     taxonomy = Taxonomy.model_validate_json(taxonomy_path.read_text(encoding="utf-8"))
     _print_summary(taxonomy)
     console.print()

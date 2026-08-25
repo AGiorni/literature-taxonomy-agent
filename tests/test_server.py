@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def workspace(tmp_path: Path):
     (source / "nested").mkdir()
     (source / "nested" / "deep.pdf").write_bytes(b"%PDF-1.7 nested")
 
-    out = tmp_path / "out"
+    out = source / "littax"
     out.mkdir()
     taxonomy = Taxonomy(
         generated_at=datetime.now(timezone.utc),
@@ -60,7 +61,8 @@ def workspace(tmp_path: Path):
     )
     (out / "taxonomy.json").write_text(taxonomy.model_dump_json(), encoding="utf-8")
 
-    cfg = Config(source_root=source, out_dir=out, cache_dir=tmp_path / ".cache")
+    # out_dir stays unset: the project lives beside the PDFs, at <source>/littax.
+    cfg = Config(source_root=source, cache_dir=tmp_path / ".cache")
     return cfg, tmp_path
 
 
@@ -89,7 +91,7 @@ class TestPages:
 
 class TestStateMissing:
     def test_404_before_first_run(self, tmp_path):
-        cfg = Config(source_root=tmp_path, out_dir=tmp_path / "empty")
+        cfg = Config(source_root=tmp_path / "empty")
         response = TestClient(create_app(cfg)).get("/api/state")
         assert response.status_code == 404
 
@@ -126,3 +128,141 @@ class TestRun:
         _, tmp_path = workspace
         response = client.post("/api/run", json={"source": str(tmp_path / "does-not-exist")})
         assert response.status_code == 400
+
+
+SECRET = "sk-do-not-leak-0123456789"
+
+
+class Captured(dict):
+    """What the pipeline was asked to do, once the worker thread got there."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.called = threading.Event()
+
+    def __getitem__(self, key):
+        # /api/run returns as soon as the thread is started, so every read has
+        # to wait for it rather than race it.
+        assert self.called.wait(timeout=5), "the pipeline was never called"
+        return super().__getitem__(key)
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """Run /api/run without a pipeline, keeping what it was asked to do."""
+    import littax.pipeline
+
+    seen = Captured()
+
+    def fake_run(cfg, progress=None, credentials=None):
+        dict.__setitem__(seen, "cfg", cfg)
+        dict.__setitem__(seen, "credentials", credentials)
+        seen.called.set()
+        raise RuntimeError("stop here - the arguments are what matter")
+
+    monkeypatch.setattr(littax.pipeline, "run", fake_run)
+    return seen
+
+
+class TestProjectDetection:
+    def test_browse_flags_analysed_folders(self, client, workspace):
+        _, tmp_path = workspace
+        body = client.get("/api/browse", params={"path": str(tmp_path)}).json()
+        entry = next(d for d in body["directories"] if d["name"] == "raw")
+        assert entry["has_taxonomy"] is True
+        assert body["has_taxonomy"] is False  # tmp_path itself is not a project
+
+    def test_open_switches_project(self, client, workspace):
+        _, tmp_path = workspace
+        assert client.post("/api/open", json={"source": str(tmp_path / "raw")}).status_code == 200
+        assert client.get("/api/state").json()["stats"]["n_documents"] == 2
+
+    def test_open_404s_on_a_plain_folder(self, client, workspace):
+        _, tmp_path = workspace
+        response = client.post("/api/open", json={"source": str(tmp_path / "raw" / "nested")})
+        assert response.status_code == 404
+
+
+class TestRunConfiguration:
+    def test_standard_mode_leaves_labelling_off(self, client, workspace, captured):
+        _, tmp_path = workspace
+        client.post("/api/run", json={"source": str(tmp_path / "raw"), "ai_assisted": False})
+        assert captured["cfg"].label.enabled is False
+        assert captured["credentials"] is None
+
+    def test_ai_mode_passes_credentials_beside_the_config(self, client, workspace, captured):
+        _, tmp_path = workspace
+        client.post(
+            "/api/run",
+            json={
+                "source": str(tmp_path / "raw"),
+                "ai_assisted": True,
+                "llm": {
+                    "provider": "azure-openai",
+                    "model": "gpt-4o",
+                    "deployment": "my-deployment",
+                    "credentials": {
+                        "api_key": SECRET,
+                        "endpoint": "https://example.openai.azure.com/",
+                    },
+                },
+            },
+        )
+        cfg = captured["cfg"]
+        assert cfg.label.enabled is True
+        assert cfg.label.provider == "azure-openai"
+        assert cfg.label.deployment == "my-deployment"
+        assert captured["credentials"].api_key == SECRET
+        # The one that matters: Config is serialised into taxonomy.json.
+        assert SECRET not in cfg.model_dump_json()
+
+    def test_the_browser_cannot_change_the_analysis_path(self, client, workspace, captured):
+        """embed/cluster are config-file territory, not UI territory."""
+        cfg, tmp_path = workspace
+        client.post(
+            "/api/run",
+            json={
+                "source": str(tmp_path / "raw"),
+                "ai_assisted": False,
+                "embed": {"backend": "tfidf"},
+                "cluster": {"reducer": "none"},
+            },
+        )
+        assert captured["cfg"].embed == cfg.embed
+        assert captured["cfg"].cluster == cfg.cluster
+
+    def test_writes_beside_the_pdfs(self, client, workspace, captured):
+        _, tmp_path = workspace
+        client.post("/api/run", json={"source": str(tmp_path / "raw"), "ai_assisted": False})
+        assert captured["cfg"].out == tmp_path / "raw" / "littax"
+
+
+class TestMissingExtras:
+    def test_run_400s_instead_of_failing_in_the_worker(self, client, workspace, monkeypatch):
+        import littax.server.app as server
+
+        monkeypatch.setattr(server, "missing_for", lambda cfg: ["uv sync --extra ml"])
+        _, tmp_path = workspace
+        response = client.post(
+            "/api/run", json={"source": str(tmp_path / "raw"), "ai_assisted": False}
+        )
+        assert response.status_code == 400
+        assert "uv sync --extra ml" in response.json()["detail"]
+
+
+class TestProviders:
+    def test_describes_both_providers_without_secrets(self, client):
+        body = client.get("/api/providers").json()
+        ids = {p["id"] for p in body["providers"]}
+        assert ids == {"foundry", "azure-openai"}
+        azure = next(p for p in body["providers"] if p["id"] == "azure-openai")
+        assert azure["needs_deployment"] is True
+        assert {f["id"] for f in azure["fields"]} == {"api_key", "endpoint"}
+        assert next(f for f in azure["fields"] if f["id"] == "api_key")["secret"] is True
+
+    def test_config_reports_key_names_only(self, client, monkeypatch):
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", SECRET)
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/")
+        body = client.get("/api/config").text
+        assert "AZURE_OPENAI_API_KEY" in body
+        assert SECRET not in body

@@ -2,8 +2,12 @@
 # Run with:  uv run littax run raw -c config.toml
 
 source_root = "raw"          # folder of PDFs; never modified
-out_dir     = "out"           # taxonomy.json lands here
-cache_dir   = ".cache"        # safe to delete; only costs time to rebuild
+# out_dir   = "out"           # taxonomy.json lands here. Unset (the default)
+                              # means <source_root>/littax, so results live
+                              # beside the PDFs and each folder keeps its own.
+cache_dir   = ".cache"        # safe to delete; only costs time to rebuild.
+                              # Shared across corpora on purpose: entries are
+                              # keyed by file hash, so nothing collides.
 target_root = "organised"     # root of the proposed folder tree in move_plan
 
 [ingest]

@@ -10,6 +10,16 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+# A corpus folder becomes a "littax project" by gaining this subdirectory.
+# Keeping the results beside the PDFs means a folder carries its own taxonomy:
+# copy or move it and the analysis travels with it.
+PROJECT_DIR = "littax"
+
+
+def has_project(source: Path) -> bool:
+    """Whether `source` has already been analysed. The single definition."""
+    return (source / PROJECT_DIR / "taxonomy.json").is_file()
+
 
 class IngestConfig(BaseModel):
     glob: str = "**/*.pdf"
@@ -106,7 +116,12 @@ class LabelConfig(BaseModel):
 
 class Config(BaseModel):
     source_root: Path = Path("raw")
-    out_dir: Path = Path("out")
+    # Unset means "beside the PDFs", at <source_root>/littax - so analysing a
+    # second folder cannot overwrite the first. Read it through `.out`, never
+    # directly; set it only to override that.
+    out_dir: Path | None = None
+    # Deliberately *not* per-project: the parsed and LLM caches are keyed by
+    # file hash, so sharing one across corpora is a saving, not an oversight.
     cache_dir: Path = Path(".cache")
     # Root of the proposed reorganisation, used to build move_plan targets.
     target_root: Path = Path("organised")
@@ -117,6 +132,11 @@ class Config(BaseModel):
     score: ScoreConfig = Field(default_factory=ScoreConfig)
     terms: TermsConfig = Field(default_factory=TermsConfig)
     label: LabelConfig = Field(default_factory=LabelConfig)
+
+    @property
+    def out(self) -> Path:
+        """Where taxonomy.json lives: per-corpus unless out_dir was set."""
+        return self.out_dir if self.out_dir is not None else self.source_root / PROJECT_DIR
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":

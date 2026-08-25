@@ -2,16 +2,18 @@
 
 Points at a folder of research PDFs, **discovers** a multi-level topic taxonomy
 from the corpus itself, assigns every paper to a leaf folder with a confidence
-score, and writes a reorganisation plan to `out/taxonomy.json`.
+score, and writes a reorganisation plan to `<your-folder>/littax/taxonomy.json`.
 
-Your source folder is never modified. Reorganising is a separate, explicit step.
+Results live beside the PDFs they describe, so a folder carries its own
+taxonomy: analyse two folders and neither overwrites the other. Your PDFs are
+never modified. Reorganising is a separate, explicit step.
 
 ```bash
 uv sync --extra ml --extra web      # + --extra llm for LLM folder names
 uv run littax doctor raw            # check the environment first
 uv run littax run raw               # discover the taxonomy
 uv run littax serve raw             # inspect it at http://127.0.0.1:8000
-uv run littax apply out/taxonomy.json --mode hardlink
+uv run littax apply raw/littax/taxonomy.json --mode hardlink
 ```
 
 ## Starting from nothing
@@ -35,8 +37,20 @@ uv sync --extra ml --extra web
 uv run littax serve "C:/path/to/your/papers"
 ```
 
-Open <http://127.0.0.1:8000>, click **Analyse a folder…**, pick your PDFs and
-press Run. No API key, no account, nothing leaves your machine.
+Open <http://127.0.0.1:8000>. The folder picker opens by itself; browse to your
+PDFs and press **Continue**. Folders already analysed are marked `✓ analysed`
+and open straight from their saved taxonomy instead of re-running.
+
+Then choose how folders get named:
+
+- **Standard** — names come from each cluster's distinctive terms. No API calls,
+  no key, nothing leaves your machine.
+- **AI-assisted** — an LLM writes the names and descriptions and reviews the
+  tree. Pick a provider, paste the endpoint and key, and press **Test
+  connection** before committing to a run. Tick *Remember on this machine* to
+  save them to `.env` so you only do this once.
+
+Nothing needs editing in a config file for either path.
 
 **First run downloads about 3 GB** (PyTorch plus one embedding model) and then
 works offline forever. To skip that entirely, create `config.toml` with:

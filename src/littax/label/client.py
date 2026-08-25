@@ -260,10 +260,15 @@ class _DroppedTuning(Exception):
 class FoundryLabeller(BaseLabeller):
     provider = "foundry"
 
-    def __init__(self, cfg: LabelConfig, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        cfg: LabelConfig,
+        cache_dir: Path,
+        credentials: FoundryCredentials | None = None,
+    ) -> None:
         super().__init__(cfg, cache_dir)
 
-        credentials = FoundryCredentials.from_env()
+        credentials = credentials or FoundryCredentials.from_env()
         if credentials is None:
             raise LabellingUnavailable(
                 "Claude labelling needs ANTHROPIC_FOUNDRY_API_KEY and "
@@ -368,10 +373,15 @@ class FoundryLabeller(BaseLabeller):
 class AzureOpenAILabeller(BaseLabeller):
     provider = "azure-openai"
 
-    def __init__(self, cfg: LabelConfig, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        cfg: LabelConfig,
+        cache_dir: Path,
+        credentials: AzureOpenAICredentials | None = None,
+    ) -> None:
         super().__init__(cfg, cache_dir)
 
-        credentials = AzureOpenAICredentials.from_env()
+        credentials = credentials or AzureOpenAICredentials.from_env()
         if credentials is None:
             raise LabellingUnavailable(
                 "Azure OpenAI labelling needs AZURE_OPENAI_API_KEY and "
@@ -558,7 +568,16 @@ PROVIDERS = {
 }
 
 
-def build_labeller(cfg: LabelConfig, cache_dir: Path) -> BaseLabeller:
+def build_labeller(
+    cfg: LabelConfig, cache_dir: Path, credentials: Any | None = None
+) -> BaseLabeller:
+    """Construct the provider's labeller.
+
+    `credentials` lets a caller supply values the environment does not hold -
+    the viewer collects them from a form. They stay a parameter rather than a
+    config field on purpose: Config is serialised into taxonomy.json, so an
+    api_key living there would be written to disk in cleartext.
+    """
     try:
         provider = PROVIDERS[cfg.provider]
     except KeyError:
@@ -566,4 +585,32 @@ def build_labeller(cfg: LabelConfig, cache_dir: Path) -> BaseLabeller:
             f"unknown label.provider {cfg.provider!r}; expected one of "
             + ", ".join(sorted(PROVIDERS))
         ) from None
-    return provider(cfg, cache_dir)
+    return provider(cfg, cache_dir, credentials)
+
+
+def probe_labeller(
+    cfg: LabelConfig,
+    cache_dir: Path,
+    credentials: Any | None = None,
+    *,
+    deployments: bool = False,
+) -> dict[str, Any]:
+    """One tiny real call, reported as a result rather than an exception.
+
+    Never raises: a configuration problem is something to show the user, not
+    something every call site should have to catch. Shared by `littax doctor
+    --probe` and the viewer's "Test connection" so the two cannot drift apart.
+
+    `deployments` adds the provider's deployment names, for a UI that wants to
+    offer them as a dropdown. Off by default - it is a second HTTP round trip,
+    and the CLI already names them in the one case where it matters, a 404.
+    """
+    try:
+        labeller = build_labeller(cfg, cache_dir, credentials)
+        result = dict(labeller.probe())
+    except LabellingUnavailable as exc:
+        return {"ok": False, "reason": str(exc), "deployments": []}
+
+    lister = getattr(labeller, "list_deployments", None)
+    result["deployments"] = lister() if deployments and lister else []
+    return result

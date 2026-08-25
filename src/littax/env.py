@@ -68,6 +68,42 @@ def load_env(path: Path | None = None) -> Path | None:
     return None
 
 
+def write_keys(values: dict[str, str], path: Path | None = None) -> Path:
+    """Persist credentials to `.env`, leaving every other line untouched.
+
+    Rewrites a key in place if it is already there and appends it otherwise, so
+    the comments explaining each setting survive. Only KNOWN_KEYS are written:
+    this exists to remember credentials the user typed, not to become a general
+    settings store.
+    """
+    target = path or _loaded or (Path.cwd() / ".env")
+    accepted = {k: v for k, v in values.items() if k in KNOWN_KEYS and v}
+    if not accepted:
+        return target
+
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    remaining = dict(accepted)
+    for index, line in enumerate(lines):
+        key = line.partition("=")[0].strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        if key in remaining:
+            lines[index] = f"{key}={remaining.pop(key)}"
+
+    if remaining and lines and lines[-1].strip():
+        lines.append("")
+    lines.extend(f"{key}={value}" for key, value in remaining.items())
+
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # The values are live in this process too, so a later from_env() agrees.
+    os.environ.update(accepted)
+    return target
+
+
 def loaded_from() -> Path | None:
     return _loaded
 

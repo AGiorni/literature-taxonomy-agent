@@ -226,6 +226,23 @@ main {
 .node-meter i { display: block; height: 100%; background: var(--series-1); }
 .children { margin-left: 14px; border-left: 1px solid var(--grid); padding-left: 4px; }
 
+/* Full folder name on hover, since .node-label has to truncate in a narrow
+   sidebar. Fixed rather than absolute: .tree is a scroll container, so an
+   absolutely positioned tip would be clipped at the panel edge - exactly where
+   a long name needs to escape to. */
+.node-tip {
+  position: fixed; z-index: 60; pointer-events: none;
+  max-width: min(420px, 60vw); padding: 7px 10px;
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 13px; font-weight: 700; line-height: 1.35;
+}
+.node-tip .tip-desc {
+  display: block; margin-top: 4px;
+  font-weight: 400; font-size: 12px; color: var(--text-secondary);
+}
+
 /* ---------- table ---------- */
 
 .table-wrap { overflow-x: auto; max-height: 460px; overflow-y: auto; }
@@ -263,8 +280,19 @@ td.folder { color: var(--text-secondary); font-size: 12px; max-width: 220px; }
 
 /* ---------- legend ---------- */
 
-.legend { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.legend { display: flex; align-items: center; gap: 10px 16px; font-size: 12px; color: var(--muted); flex-wrap: wrap; margin: 0 0 8px; }
 .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+/* Mirrors the plot's marker shape, so identity survives a greyscale print or a
+   colourblind reader. */
+.legend .glyph { display: inline-block; margin-right: 5px; font-size: 11px; line-height: 1; }
+/* Scatter-only controls, sitting with the plot they drive rather than in the
+   global filter row. */
+.plot-controls { display: flex; gap: 12px; flex-shrink: 0; }
+.plot-controls select {
+  font: inherit; font-size: 13px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--page); color: var(--text-primary);
+}
 .ramp { display: inline-flex; height: 8px; border-radius: 4px; overflow: hidden; width: 90px; vertical-align: -1px; }
 .ramp i { flex: 1; }
 
@@ -279,6 +307,27 @@ dialog::backdrop { background: rgba(0,0,0,0.45); }
 .dir-list li:last-child { border-bottom: 0; }
 .dir-list li:hover { background: var(--page); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.dir-list li .tag { float: right; color: var(--good); font-size: 11px; }
+
+/* Radio cards: the whole tile is the hit target, not just the dot. */
+.cards { display: grid; gap: 8px; margin: 12px 0; }
+.card { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.card:hover { background: var(--page); }
+.card input { grid-row: 1 / span 3; align-self: center; }
+.card strong { font-size: 13px; }
+.card span { grid-column: 2; }
+.card:has(input:checked) { border-color: var(--series-1); box-shadow: inset 0 0 0 1px var(--series-1); }
+.card:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+
+#provider-fields .field, #step-llm > .field { margin: 10px 0; }
+#provider-fields input, #step-llm input[type="text"], #step-llm input[type="password"] {
+  font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--page); color: var(--text-primary); width: 100%;
+}
+.test-row { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; }
+.checkbox { display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin-top: 6px; }
+.banner { border: 1px solid currentColor; border-radius: 8px; padding: 8px 10px; margin: 10px 0; }
+.ok { color: var(--good); }
 
 .progress { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: grid; place-items: center; z-index: 50; }
 .progress-inner { background: var(--surface-1); border-radius: var(--radius); padding: 24px; width: min(460px, 92vw); }

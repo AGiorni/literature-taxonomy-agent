@@ -8,7 +8,7 @@ import os
 import pytest
 
 from littax.config import AzureOpenAICredentials, azure_endpoint_problem
-from littax.env import _parse, load_env, present_keys
+from littax.env import _parse, load_env, present_keys, write_keys
 
 
 class TestParse:
@@ -133,3 +133,48 @@ class TestPresentKeys:
     def test_ignores_empty_values(self, monkeypatch):
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", "")
         assert "AZURE_OPENAI_API_KEY" not in present_keys()
+
+
+class TestWriteKeys:
+    """Remembering a credential must not cost the user their .env comments."""
+
+    def test_creates_a_missing_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+        target = tmp_path / ".env"
+        write_keys({"AZURE_OPENAI_API_KEY": "abc"}, target)
+        assert _parse(target.read_text()) == {"AZURE_OPENAI_API_KEY": "abc"}
+
+    def test_updates_in_place_and_keeps_everything_else(self, tmp_path):
+        target = tmp_path / ".env"
+        target.write_text(
+            "# how to find this\nAZURE_OPENAI_API_KEY=old\nUNRELATED=keep-me\n",
+            encoding="utf-8",
+        )
+        write_keys({"AZURE_OPENAI_API_KEY": "new"}, target)
+
+        text = target.read_text()
+        assert "# how to find this" in text
+        assert "UNRELATED=keep-me" in text
+        assert _parse(text)["AZURE_OPENAI_API_KEY"] == "new"
+        assert text.count("AZURE_OPENAI_API_KEY") == 1
+
+    def test_appends_a_key_that_is_not_there_yet(self, tmp_path):
+        target = tmp_path / ".env"
+        target.write_text("AZURE_OPENAI_API_KEY=abc\n", encoding="utf-8")
+        write_keys({"AZURE_OPENAI_ENDPOINT": "https://x.openai.azure.com/"}, target)
+
+        parsed = _parse(target.read_text())
+        assert parsed["AZURE_OPENAI_API_KEY"] == "abc"
+        assert parsed["AZURE_OPENAI_ENDPOINT"] == "https://x.openai.azure.com/"
+
+    def test_refuses_keys_it_does_not_own(self, tmp_path):
+        """This remembers credentials; it is not a general settings store."""
+        target = tmp_path / ".env"
+        write_keys({"SOMETHING_ELSE": "x", "AZURE_OPENAI_API_KEY": "abc"}, target)
+        assert _parse(target.read_text()) == {"AZURE_OPENAI_API_KEY": "abc"}
+
+    def test_skips_blank_values(self, tmp_path):
+        target = tmp_path / ".env"
+        target.write_text("AZURE_OPENAI_API_KEY=abc\n", encoding="utf-8")
+        write_keys({"AZURE_OPENAI_API_KEY": ""}, target)
+        assert _parse(target.read_text())["AZURE_OPENAI_API_KEY"] == "abc"

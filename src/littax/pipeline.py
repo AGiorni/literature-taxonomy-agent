@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
@@ -94,7 +94,15 @@ def _folder_paths(root: Node, labels: dict[str, str]) -> dict[str, str]:
     return paths
 
 
-def run(cfg: Config, progress: Progress | None = None) -> Taxonomy:
+def run(
+    cfg: Config, progress: Progress | None = None, credentials: Any | None = None
+) -> Taxonomy:
+    """Discover the taxonomy.
+
+    `credentials` overrides what the environment supplies for the labelling
+    provider. It is a parameter and not a Config field because Config is
+    serialised into taxonomy.json - an api_key there would be written to disk.
+    """
     report = progress or _noop
 
     # ---- 1. scan -----------------------------------------------------------
@@ -152,7 +160,7 @@ def run(cfg: Config, progress: Progress | None = None) -> Taxonomy:
         from littax.label.naming import apply_renames, label_tree, review_coherence
 
         report("label", 0, len(nodes), f"{cfg.label.provider}:{cfg.label.model}")
-        labeller = build_labeller(cfg.label, cfg.cache_dir)
+        labeller = build_labeller(cfg.label, cfg.cache_dir, credentials)
         titles = [row[1].title for row in unique]
         node_labels = label_tree(
             labeller, root, X, titles, terms_by_node, cfg.label, report

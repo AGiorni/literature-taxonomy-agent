@@ -251,14 +251,25 @@ class TestMissingExtras:
 
 
 class TestProviders:
-    def test_describes_both_providers_without_secrets(self, client):
+    def test_describes_every_provider_without_secrets(self, client):
         body = client.get("/api/providers").json()
         ids = {p["id"] for p in body["providers"]}
-        assert ids == {"foundry", "azure-openai"}
+        assert ids == {"foundry", "azure-openai", "ollama"}
         azure = next(p for p in body["providers"] if p["id"] == "azure-openai")
         assert azure["needs_deployment"] is True
         assert {f["id"] for f in azure["fields"]} == {"api_key", "endpoint"}
         assert next(f for f in azure["fields"] if f["id"] == "api_key")["secret"] is True
+
+    def test_ollama_asks_for_no_credentials(self, client):
+        """The point of the local provider: nothing to sign up for."""
+        body = client.get("/api/providers").json()
+        ollama = next(p for p in body["providers"] if p["id"] == "ollama")
+        assert ollama["fields"] == []
+        assert ollama["local"] is True
+        # No SDK and no key, so it is never gated behind an install or a login.
+        assert ollama["sdk_installed"] is True
+        assert ollama["env_ready"] is True
+        assert ollama["base_url"]["default"].startswith("http://")
 
     def test_config_reports_key_names_only(self, client, monkeypatch):
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", SECRET)

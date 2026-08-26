@@ -803,11 +803,15 @@ function wireRunDialog() {
       ? `Cannot run yet — install first: ${blocked.join("; ")}`
       : "";
 
-    const llmBlocked = setup.config?.missing_for_llm || [];
-    const llmOnly = llmBlocked.filter((cmd) => !blocked.includes(cmd));
-    $("#mode-ai").disabled = llmOnly.length > 0 || blocked.length > 0;
-    $("#mode-ai-blocked").hidden = llmOnly.length === 0;
-    $("#mode-ai-blocked").textContent = llmOnly.length ? `Install first: ${llmOnly.join("; ")}` : "";
+    // AI-assisted needs *a* usable provider, not the configured one. Ollama
+    // needs no SDK, so it keeps this path open on an install with neither
+    // cloud SDK present - the daemon check happens at the provider step.
+    const usable = setup.providers.filter((p) => p.sdk_installed);
+    $("#mode-ai").disabled = usable.length === 0 || blocked.length > 0;
+    $("#mode-ai-blocked").hidden = usable.length > 0;
+    $("#mode-ai-blocked").textContent = usable.length
+      ? ""
+      : `Install first: ${(setup.config?.missing_for_llm || []).join("; ")}`;
     if ($("#mode-ai").disabled) $("#mode-standard").checked = true;
 
     syncModeButton();
@@ -870,14 +874,60 @@ function wireRunDialog() {
     $("#llm-model").value = provider.default_model;
     $("#deployment-field").hidden = !provider.needs_deployment;
     if (provider.needs_deployment) $("#llm-deployment").value = provider.default_model;
-    $("#llm-test-result").textContent = provider.env_ready
-      ? "Credentials already on this machine — leave blank to use them."
-      : "";
+
+    // A local provider is addressed rather than authenticated: it shows an
+    // address, and there is no secret to remember.
+    $("#base-url-field").hidden = !provider.base_url;
+    if (provider.base_url) {
+      $("#base-url-label").textContent = provider.base_url.label;
+      $("#llm-base-url").value = provider.base_url.default;
+      $("#llm-base-url").placeholder = provider.base_url.placeholder;
+    }
+    $("#remember-field").hidden = Boolean(provider.local);
+    $("#ollama-install").hidden = true;
+
+    $("#llm-test-result").textContent =
+      provider.local
+        ? "Runs on this machine. Test the connection to list installed models."
+        : provider.env_ready
+          ? "Credentials already on this machine — leave blank to use them."
+          : "";
     $("#llm-test-result").className = "small muted";
     for (const input of document.querySelectorAll("#provider-fields input")) {
       input.oninput = syncStartButton;
     }
+    // Local providers auto-check, so the install panel appears without the
+    // user having to guess that "Test connection" is the next thing to press.
+    if (provider.local) testConnection();
     syncStartButton();
+  }
+
+  /** Install guidance for a local provider whose daemon is not answering. */
+  function showInstallPanel(result) {
+    const provider = setup.provider;
+    const install = provider?.install || {};
+    const platform = /Win/i.test(navigator.platform || "")
+      ? "windows"
+      : /Mac/i.test(navigator.platform || "")
+        ? "macos"
+        : "linux";
+    const model = $("#llm-model").value.trim() || provider?.default_model;
+
+    const steps =
+      result.reason_code === "no_model"
+        ? [`Pull the model: <code>ollama pull ${escapeHtml(model)}</code>`]
+        : [
+            `Install it: <code>${escapeHtml(install[platform] || install.url || "")}</code>`,
+            `Pull a model: <code>ollama pull ${escapeHtml(model)}</code>`,
+            "It starts automatically once installed.",
+          ];
+
+    $("#install-title").textContent =
+      result.reason_code === "no_model"
+        ? "That model is not installed yet"
+        : "Ollama is not running";
+    $("#install-steps").innerHTML = steps.map((s) => `<li>${s}</li>`).join("");
+    $("#ollama-install").hidden = false;
   }
 
   /** Credentials as the server expects them; blank means "use the environment". */
@@ -896,6 +946,7 @@ function wireRunDialog() {
       deployment: setup.provider?.needs_deployment
         ? $("#llm-deployment").value.trim() || null
         : null,
+      base_url: setup.provider?.base_url ? $("#llm-base-url").value.trim() || null : null,
       credentials: credentials(),
     };
   }
@@ -903,13 +954,14 @@ function wireRunDialog() {
   function syncStartButton() {
     const values = credentials();
     const filled = (setup.provider?.fields || []).every((f) => values[f.id]);
-    // Blank fields are fine when the environment already holds the pair.
+    // Blank fields are fine when the environment already holds the pair, and a
+    // provider with no fields at all has nothing to wait for.
     $("#start-run").disabled = !filled && !setup.provider?.env_ready;
   }
 
   $("#llm-back").onclick = () => showStep("step-mode");
 
-  $("#llm-test").onclick = async () => {
+  async function testConnection() {
     const result = $("#llm-test-result");
     result.className = "small muted";
     result.textContent = "Testing…";
@@ -919,14 +971,25 @@ function wireRunDialog() {
       body: JSON.stringify(llmSettings()),
     }).then((r) => r.json()).catch(() => ({ ok: false, reason: "Could not reach the server." }));
 
+    // Azure calls them deployments, Ollama calls them models; the server sends
+    // whichever the provider has under one name.
     if (response.deployments?.length) {
-      $("#deployment-options").innerHTML = response.deployments
+      const options = response.deployments
         .map((d) => `<option value="${escapeHtml(d)}"></option>`)
         .join("");
+      $("#deployment-options").innerHTML = options;
+      $("#model-options").innerHTML = options;
+      // A local model must actually be pulled, so prefer one that is.
+      if (setup.provider?.local && !response.deployments.includes($("#llm-model").value)) {
+        $("#llm-model").value = response.deployments[0];
+      }
     }
+
+    $("#ollama-install").hidden = true;
     if (!response.ok) {
       result.className = "small error";
       result.textContent = response.reason || "Failed.";
+      if (response.reason_code) showInstallPanel(response);
     } else if (!response.matches) {
       // Worse than a failure: the run would succeed and bill at another rate.
       result.className = "small error";
@@ -935,7 +998,11 @@ function wireRunDialog() {
       result.className = "small ok";
       result.textContent = `✓ ${response.served} answered`;
     }
-  };
+    syncStartButton();
+  }
+
+  $("#llm-test").onclick = testConnection;
+  $("#install-retry").onclick = testConnection;
 
   $("#start-run").onclick = () => startRun(true);
 

@@ -100,11 +100,16 @@ class LabelConfig(BaseModel):
     enabled: bool = False
     # "foundry"      -> Claude on Microsoft Foundry (Anthropic SDK)
     # "azure-openai" -> GPT models on Azure OpenAI (openai SDK)
-    provider: Literal["foundry", "azure-openai"] = "foundry"
+    # "ollama"       -> a model running locally; free, no account, no SDK
+    provider: Literal["foundry", "azure-openai", "ollama"] = "foundry"
     model: str = "claude-opus-5"
     # Azure OpenAI addresses a *deployment*, whose name is chosen at deploy time
     # and need not match the model id. Falls back to `model` when unset.
     deployment: str | None = None
+    # Where a self-hosted provider listens. Unlike an api_key this is not a
+    # secret, so it belongs in the config and is welcome in taxonomy.json as
+    # provenance. "ollama" only; falls back to $OLLAMA_HOST then localhost.
+    base_url: str | None = None
     api_version: str = "2024-10-21"
     max_workers: int = 6
     max_retries: int = 5
@@ -227,5 +232,11 @@ class AzureOpenAICredentials(BaseModel):
 
 
 def credentials_for(provider: str):
-    """The credential class a provider needs, whether or not it is satisfied."""
+    """The credential class a provider needs, whether or not it is satisfied.
+
+    None means the provider needs no credentials at all - a local model has
+    nothing to authenticate against.
+    """
+    if provider == "ollama":
+        return None
     return FoundryCredentials if provider == "foundry" else AzureOpenAICredentials

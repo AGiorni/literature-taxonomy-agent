@@ -28,6 +28,38 @@ def _bootstrap() -> None:
     load_env()
 
 
+def _record_ollama(cfg: Config, record) -> None:
+    """Is the daemon up, is the model pulled, and how much context does it hold.
+
+    Reported without --probe because none of it costs a token, and a local setup
+    fails in ways the cloud providers cannot: daemon stopped, model never pulled.
+    """
+    from littax.label.client import OllamaLabeller
+
+    labeller = OllamaLabeller(cfg.label, cfg.cache_dir)
+    models = labeller.list_models()
+    if not models:
+        record(
+            "ollama",
+            False,
+            f"not reachable at {labeller.base_url}. Install from https://ollama.com, "
+            f"then: ollama pull {cfg.label.model}",
+        )
+        return
+
+    record("ollama", True, f"{labeller.base_url} · {len(models)} model(s) installed")
+    if cfg.label.model not in models:
+        record(
+            "model pulled",
+            False,
+            f"{cfg.label.model!r} not installed. Have: {', '.join(models)}. "
+            f"Run: ollama pull {cfg.label.model}",
+        )
+    else:
+        context = labeller.model_info()["context_length"]
+        record("model pulled", True, f"{cfg.label.model} · {context} token context")
+
+
 def _load_config(config_path: Optional[Path], source: Optional[Path]) -> Config:
     cfg = Config.load(config_path)
     if source is not None:
@@ -113,7 +145,11 @@ def doctor(
 
         model = cfg.label.model
         rates = MODEL_RATES.get(model)
-        if rates:
+        if provider == "ollama":
+            # Not "pricing unknown": a local model costs nothing, and listing
+            # the cloud price table here would only confuse.
+            record("model", True, f"{model} · free, runs locally · json mode")
+        elif rates:
             tuning = (
                 "adaptive thinking"
                 if supports_adaptive_thinking(model)
@@ -142,32 +178,44 @@ def doctor(
         )
 
         credential_class = credentials_for(provider)
-        credentials = credential_class.from_env()
-        if credentials is None:
-            missing = [n for n in credential_class.ENV_VARS if not os.environ.get(n)]
-            hint = "set " + " and ".join(missing)
-            if found:
-                # A common mix-up: the other provider's keys are present.
-                hint += f" (found instead: {', '.join(found)})"
-            record("credentials", False, hint)
+        if credential_class is None:
+            # A local model has nothing to authenticate against. `credentials`
+            # stays truthy so the --probe branch below still runs.
+            credentials = True
+            record("credentials", True, "not needed - runs locally", fatal=False)
         else:
-            problem = getattr(credentials, "problem", None)
-            if problem:
-                record("credentials", False, problem)
+            credentials = credential_class.from_env()
+            if credentials is None:
+                missing = [n for n in credential_class.ENV_VARS if not os.environ.get(n)]
+                hint = "set " + " and ".join(missing)
+                if found:
+                    # A common mix-up: the other provider's keys are present.
+                    hint += f" (found instead: {', '.join(found)})"
+                record("credentials", False, hint)
             else:
-                record(
-                    "credentials",
-                    True,
-                    getattr(credentials, "resource", None)
-                    or getattr(credentials, "endpoint", ""),
-                )
+                problem = getattr(credentials, "problem", None)
+                if problem:
+                    record("credentials", False, problem)
+                else:
+                    record(
+                        "credentials",
+                        True,
+                        getattr(credentials, "resource", None)
+                        or getattr(credentials, "endpoint", ""),
+                    )
 
-        sdk = SDK_FOR_PROVIDER.get(provider, "openai")
-        record(
-            f"{sdk} sdk",
-            installed.get(sdk, False),
-            "installed" if installed.get(sdk) else "needs: uv sync --extra llm",
-        )
+        sdk = SDK_FOR_PROVIDER.get(provider)
+        if sdk is None:
+            record("sdk", True, f"none needed for {provider}", fatal=False)
+        else:
+            record(
+                f"{sdk} sdk",
+                installed.get(sdk, False),
+                "installed" if installed.get(sdk) else "needs: uv sync --extra llm",
+            )
+
+        if provider == "ollama":
+            _record_ollama(cfg, record)
 
         if probe and credentials:
             from littax.label.client import probe_labeller

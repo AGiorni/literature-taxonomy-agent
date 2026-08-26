@@ -182,11 +182,25 @@
       <h2>Connect a model</h2>
       <div class="cards" id="provider-cards"></div>
 
+      <!-- Shown when a local provider's daemon is not answering. littax never
+           installs anything; it says what to run. -->
+      <div class="banner install" id="ollama-install" hidden>
+        <strong id="install-title">Ollama is not running</strong>
+        <ol id="install-steps"></ol>
+        <button class="btn" id="install-retry" type="button">Retry</button>
+      </div>
+
+      <label class="field" id="base-url-field" hidden>
+        <span id="base-url-label">Address</span>
+        <input id="llm-base-url" type="text" spellcheck="false">
+      </label>
+
       <div id="provider-fields"></div>
 
       <label class="field">
         <span>Model</span>
-        <input id="llm-model" type="text" spellcheck="false">
+        <input id="llm-model" type="text" spellcheck="false" list="model-options">
+        <datalist id="model-options"></datalist>
       </label>
 
       <label class="field" id="deployment-field" hidden>
@@ -201,7 +215,7 @@
         <span class="small" id="llm-test-result"></span>
       </div>
 
-      <label class="checkbox">
+      <label class="checkbox" id="remember-field">
         <input type="checkbox" id="llm-remember">
         <span>Remember on this machine <span class="muted small" id="env-path"></span></span>
       </label>

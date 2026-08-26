@@ -327,6 +327,16 @@ dialog::backdrop { background: rgba(0,0,0,0.45); }
 .test-row { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; }
 .checkbox { display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin-top: 6px; }
 .banner { border: 1px solid currentColor; border-radius: 8px; padding: 8px 10px; margin: 10px 0; }
+/* Setup guidance, not a failure: a stopped daemon is a step the user has not
+   taken yet, so it reads as instructions rather than an error. */
+.banner.install { border-color: var(--border); background: var(--page); color: var(--text-primary); }
+.banner.install ol { margin: 8px 0 10px; padding-left: 20px; font-size: 13px; }
+.banner.install li { margin: 3px 0; }
+.banner.install code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 5px; padding: 1px 5px;
+}
 .ok { color: var(--good); }
 
 .progress { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: grid; place-items: center; z-index: 50; }

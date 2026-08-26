@@ -1,13 +1,15 @@
 """LLM providers for the labelling passes.
 
-Two backends, one interface. Everything above this module only ever calls
+Three backends, one interface. Everything above this module only ever calls
 `ask_json(system, prompt)` and `map_concurrent(...)`, so adding a provider does
 not touch the naming, coherence or verification logic.
 
 - `FoundryLabeller`     - Claude on Microsoft Foundry, via the Anthropic SDK.
 - `AzureOpenAILabeller` - GPT models on Azure OpenAI, via the openai SDK.
+- `OllamaLabeller`      - a model running locally. Free, offline, no account,
+                          and no SDK: it speaks Ollama's HTTP API over urllib.
 
-Neither provider has a Batch API available here, so throughput comes from a
+No provider has a Batch API available here, so throughput comes from a
 modest thread pool. Every response is cached by prompt hash, which matters more
 than it sounds: a labelling run that dies halfway through costs nothing to
 resume, and switching models never returns a stale answer because the model id
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import time
@@ -36,6 +39,16 @@ _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
 
 class LabellingUnavailable(RuntimeError):
     """Raised when labelling is requested but cannot run."""
+
+
+# Characters Windows forbids in a path component. Model ids are not chosen with
+# filesystems in mind, so anything used as a directory name has to be cleaned.
+_UNSAFE_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def cache_namespace(provider: str, model: str) -> str:
+    """A path-safe directory name identifying one provider-and-model pair."""
+    return _UNSAFE_PATH_CHARS.sub("-", f"{provider}-{model}").strip(" .") or provider
 
 
 # --------------------------------------------------------------------------- #
@@ -150,8 +163,10 @@ class BaseLabeller:
         self.cfg = cfg
         self.usage = Usage()
         # Keyed by provider and model: switching either is a genuinely different
-        # result, not a cache hit.
-        self.cache = JsonCache(cache_dir, "llm", f"{self.provider}-{cfg.model}")
+        # result, not a cache hit. The id becomes a directory name, and model
+        # ids are not path-safe - an Ollama tag like "qwen3:8b" carries a colon,
+        # which Windows rejects outright.
+        self.cache = JsonCache(cache_dir, "llm", cache_namespace(self.provider, cfg.model))
         # Cleared if the endpoint refuses a tuning parameter.
         self.tuning_enabled = True
         self.degraded_reason: str | None = None
@@ -561,10 +576,229 @@ def _is_openai_tuning_error(message: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# A local model under Ollama
+# --------------------------------------------------------------------------- #
+
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+
+# Ollama's own default context window. Both the naming and coherence prompts
+# exceed it on a real corpus, which is why every request sizes num_ctx itself.
+OLLAMA_DEFAULT_NUM_CTX = 4096
+
+# Characters per token, deliberately pessimistic. Overestimating costs a little
+# memory; underestimating costs a silently truncated prompt.
+_CHARS_PER_TOKEN = 3.0
+
+
+def _round_up_pow2(value: int, floor: int) -> int:
+    size = floor
+    while size < value:
+        size *= 2
+    return size
+
+
+class OllamaLabeller(BaseLabeller):
+    """A model served by a local Ollama daemon: free, offline, no account.
+
+    Speaks Ollama's native /api/chat rather than its OpenAI-compatible /v1,
+    because only the native API exposes `num_ctx` - and without that knob a
+    prompt longer than the server's default window is silently truncated.
+    Transport is urllib, so this provider adds no dependency at all: with
+    Ollama the `llm` extra is not needed.
+    """
+
+    provider = "ollama"
+
+    def __init__(
+        self, cfg: LabelConfig, cache_dir: Path, credentials: Any = None
+    ) -> None:
+        super().__init__(cfg, cache_dir)
+        # No credentials: a local daemon has nothing to authenticate against.
+        # The host is configuration, and $OLLAMA_HOST is Ollama's own convention.
+        self.base_url = (
+            cfg.base_url or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL
+        ).rstrip("/")
+        if "://" not in self.base_url:
+            self.base_url = f"http://{self.base_url}"
+        self._model_info: dict[str, Any] | None = None
+
+    # -- transport ---------------------------------------------------------- #
+
+    def _post(self, path: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            json.dumps(payload).encode("utf-8"),
+            {"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            if exc.code == 404:
+                raise LabellingUnavailable(self._missing_model_message()) from exc
+            if exc.code >= 500:
+                raise _Recoverable(f"Ollama returned HTTP {exc.code}") from exc
+            raise LabellingUnavailable(f"Ollama rejected the request: {body[:200]}") from exc
+        except urllib.error.URLError as exc:
+            # Unreachable is a setup problem, not a transient one: retrying for
+            # a minute would only delay a message the user needs to act on.
+            raise LabellingUnavailable(
+                f"Ollama is not reachable at {self.base_url}. Start it, or install it "
+                f"from https://ollama.com — then: ollama pull {self.cfg.model} ({exc.reason})"
+            ) from exc
+        except TimeoutError as exc:
+            raise _Recoverable(f"Ollama timed out after {timeout}s") from exc
+
+    def list_models(self) -> list[str]:
+        """Models this daemon already has, for the picker and for a useful 404."""
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
+            return []
+        return sorted(str(m.get("name")) for m in payload.get("models", []) if m.get("name"))
+
+    def _missing_model_message(self) -> str:
+        available = self.list_models()
+        pull = f"Run: ollama pull {self.cfg.model}"
+        if available:
+            return (
+                f"model {self.cfg.model!r} is not installed. This machine has: "
+                + ", ".join(available)
+                + f". {pull}"
+            )
+        return f"model {self.cfg.model!r} is not installed and none were found. {pull}"
+
+    # -- model capabilities ------------------------------------------------- #
+
+    def model_info(self) -> dict[str, Any]:
+        """Context length and capabilities, read once and remembered."""
+        if self._model_info is None:
+            try:
+                shown = self._post("/api/show", {"model": self.cfg.model}, timeout=30)
+            except _Recoverable:
+                shown = {}
+            info = shown.get("model_info") or {}
+            # The key is namespaced by family, e.g. "qwen3.context_length".
+            context = next(
+                (int(v) for k, v in info.items() if k.endswith("context_length") and v),
+                OLLAMA_DEFAULT_NUM_CTX,
+            )
+            self._model_info = {
+                "context_length": context,
+                "capabilities": shown.get("capabilities") or [],
+            }
+        return self._model_info
+
+    def _num_ctx(self, system: str, prompt: str, max_tokens: int) -> int:
+        """A window this request certainly fits in.
+
+        Ollama truncates an over-long prompt in silence - no error, and it drops
+        the *start*, which is where the schema instruction lives. The result is
+        confident, well-formed, wrong output. So the window is sized per request
+        instead of trusting a default.
+        """
+        needed = int((len(system) + len(prompt)) / _CHARS_PER_TOKEN) + max_tokens
+        limit = self.model_info()["context_length"]
+        if needed > limit:
+            raise LabellingUnavailable(
+                f"this prompt needs about {needed} tokens but {self.cfg.model!r} holds "
+                f"{limit}. Lower label.representative_docs, turn off "
+                f"label.coherence_pass, or use a longer-context model."
+            )
+        return min(_round_up_pow2(needed, OLLAMA_DEFAULT_NUM_CTX), limit)
+
+    # -- requests ----------------------------------------------------------- #
+
+    def _request_kwargs(self, system: str, prompt: str, max_tokens: int, effort: str) -> dict:
+        payload: dict[str, Any] = {
+            "model": self.cfg.model,
+            "stream": False,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "options": {
+                "num_ctx": self._num_ctx(system, prompt, max_tokens),
+                "num_predict": max_tokens,
+                "temperature": 0,
+            },
+        }
+        # Only sent to models that advertise it; the rest reject the parameter.
+        # Reasoning lands in its own field, so this is a speed choice, not a
+        # correctness one - and a local model is slow enough for that to matter.
+        if self.tuning_enabled and "thinking" in self.model_info()["capabilities"]:
+            payload["think"] = False
+        return payload
+
+    def _call_once(self, system: str, prompt: str, max_tokens: int, effort: str) -> str:
+        payload = self._request_kwargs(system, prompt, max_tokens, effort)
+        # Local inference is slow: a naming call on an 8B model can take minutes.
+        response = self._post("/api/chat", payload, timeout=900)
+
+        served_prompt = response.get("prompt_eval_count")
+        expected = int((len(system) + len(prompt)) / (_CHARS_PER_TOKEN * 2))
+        if served_prompt is not None and served_prompt < expected:
+            # Belt and braces: the window was sized to fit, so a prompt that
+            # still came back short means it was truncated anyway. Better to
+            # fail than to label a folder from evidence the model never read.
+            raise LabellingUnavailable(
+                f"Ollama evaluated only {served_prompt} prompt tokens for a prompt of at "
+                f"least {expected} — it was truncated. Reduce the prompt size via "
+                f"label.representative_docs, or use a longer-context model."
+            )
+
+        usage_in = response.get("prompt_eval_count") or 0
+        usage_out = response.get("eval_count") or 0
+        self.usage.input_tokens += usage_in
+        self.usage.output_tokens += usage_out
+        self.usage.calls += 1
+        return response.get("message", {}).get("content", "")
+
+    def probe(self) -> dict[str, Any]:
+        try:
+            response = self._post(
+                "/api/chat",
+                {
+                    "model": self.cfg.model,
+                    "stream": False,
+                    "messages": [{"role": "user", "content": "Reply with the word: ok"}],
+                    "options": {"num_predict": 16},
+                },
+                timeout=120,
+            )
+        except LabellingUnavailable as exc:
+            return {"ok": False, "reason": str(exc)}
+        except _Recoverable as exc:
+            return {"ok": False, "reason": str(exc)}
+
+        served = response.get("model")
+        return {
+            "ok": True,
+            "requested": self.cfg.model,
+            "served": served or "unreported",
+            "matches": self._matches(served),
+        }
+
+    def estimated_cost_usd(self) -> float:
+        """Nothing. That is the entire point of running it locally."""
+        return 0.0
+
+
+# --------------------------------------------------------------------------- #
 
 PROVIDERS = {
     "foundry": FoundryLabeller,
     "azure-openai": AzureOpenAILabeller,
+    "ollama": OllamaLabeller,
 }
 
 
@@ -611,6 +845,10 @@ def probe_labeller(
     except LabellingUnavailable as exc:
         return {"ok": False, "reason": str(exc), "deployments": []}
 
-    lister = getattr(labeller, "list_deployments", None)
+    # Each provider names this after its own domain: Azure serves deployments,
+    # Ollama serves installed models.
+    lister = getattr(labeller, "list_deployments", None) or getattr(
+        labeller, "list_models", None
+    )
     result["deployments"] = lister() if deployments and lister else []
     return result

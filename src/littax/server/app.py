@@ -21,19 +21,26 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from littax.capabilities import SDK_FOR_PROVIDER, missing_for, probe_capabilities
+from littax.label.client import DEFAULT_OLLAMA_URL
 from littax.config import (
     PROJECT_DIR,
     AzureOpenAICredentials,
     Config,
     FoundryCredentials,
     LabelConfig,
+    credentials_for,
     has_project,
 )
 from littax.env import loaded_from, present_keys, write_keys
 
 STATIC = Path(__file__).parent / "static"
 
-Provider = Literal["foundry", "azure-openai"]
+Provider = Literal["foundry", "azure-openai", "ollama"]
+
+# A local model is slow enough that the two optional passes dominate the wall
+# clock, and both refine an answer rather than produce it. The browser flow
+# turns them off; config.toml stays authoritative for CLI runs.
+LOCAL_DEFAULTS = {"coherence_pass": False, "verify_low_confidence": False, "max_workers": 4}
 
 # What each provider needs from the user, so the setup form is described here
 # rather than duplicated in JavaScript.
@@ -65,6 +72,26 @@ PROVIDER_FIELDS: dict[str, dict[str, Any]] = {
             },
             {"id": "api_key", "label": "API key", "placeholder": "", "secret": True},
         ],
+    },
+    "ollama": {
+        "name": "Ollama — local, free, no account",
+        "default_model": "qwen3:4b",
+        "needs_deployment": False,
+        # Nothing to collect: a local daemon has no credentials. `fields` stays
+        # strictly about secrets, so the form knows not to ask for any.
+        "fields": [],
+        "local": True,
+        "base_url": {
+            "label": "Ollama address",
+            "placeholder": DEFAULT_OLLAMA_URL,
+            "default": DEFAULT_OLLAMA_URL,
+        },
+        "install": {
+            "windows": "winget install Ollama.Ollama",
+            "macos": "brew install ollama",
+            "linux": "curl -fsSL https://ollama.com/install.sh | sh",
+            "url": "https://ollama.com",
+        },
     },
 }
 
@@ -132,6 +159,9 @@ class LlmSettings(BaseModel):
     model: str | None = None
     deployment: str | None = None
     api_version: str | None = None
+    # Where a local provider listens. Not a secret, so it rides with the
+    # settings rather than the credentials.
+    base_url: str | None = None
     credentials: Credentials | None = None
 
 
@@ -156,6 +186,8 @@ def _build_credentials(settings: LlmSettings) -> Any | None:
     Dispatches on the literal provider rather than a fallback lookup, so an
     unexpected value cannot quietly be treated as Azure.
     """
+    if settings.provider == "ollama":
+        return None  # a local daemon has nothing to authenticate against
     supplied = settings.credentials
     if supplied is None:
         return None
@@ -183,15 +215,18 @@ def _env_values(credentials: Any) -> dict[str, str]:
 
 def _label_config(base: LabelConfig, settings: LlmSettings) -> LabelConfig:
     """The run's label settings: the config file's, overridden by the form."""
-    return base.model_copy(
-        update={
-            "enabled": True,
-            "provider": settings.provider,
-            "model": settings.model or PROVIDER_FIELDS[settings.provider]["default_model"],
-            "deployment": settings.deployment or None,
-            "api_version": settings.api_version or base.api_version,
-        }
-    )
+    spec = PROVIDER_FIELDS[settings.provider]
+    update: dict[str, Any] = {
+        "enabled": True,
+        "provider": settings.provider,
+        "model": settings.model or spec["default_model"],
+        "deployment": settings.deployment or None,
+        "api_version": settings.api_version or base.api_version,
+        "base_url": settings.base_url or None,
+    }
+    if spec.get("local"):
+        update.update(LOCAL_DEFAULTS)
+    return base.model_copy(update=update)
 
 
 def _scrub(message: str, secrets: list[str]) -> str:
@@ -246,16 +281,20 @@ def create_app(cfg: Config) -> FastAPI:
         present = set(present_keys())
         providers = []
         for key, spec in PROVIDER_FIELDS.items():
-            sdk = SDK_FOR_PROVIDER[key]
-            credential_class = (
-                FoundryCredentials if key == "foundry" else AzureOpenAICredentials
-            )
+            sdk = SDK_FOR_PROVIDER.get(key)
+            credential_class = credentials_for(key)
             providers.append(
                 {
                     "id": key,
                     **spec,
-                    "sdk_installed": installed.get(sdk, False),
-                    "env_ready": all(n in present for n in credential_class.ENV_VARS),
+                    # No SDK named means none is needed, which is true of a
+                    # provider that speaks plain HTTP.
+                    "sdk_installed": True if sdk is None else installed.get(sdk, False),
+                    # Nothing to satisfy is trivially satisfied: a local model
+                    # is ready as soon as its daemon is running.
+                    "env_ready": True
+                    if credential_class is None
+                    else all(n in present for n in credential_class.ENV_VARS),
                 }
             )
         return {"providers": providers}
@@ -332,6 +371,15 @@ def create_app(cfg: Config) -> FastAPI:
         secrets = [request.credentials.api_key] if request.credentials else []
         if result.get("reason"):
             result["reason"] = _scrub(str(result["reason"]), secrets)
+
+        # A stopped daemon is a setup step, not a bad credential. Flagging it
+        # separately lets the page show install instructions instead of an
+        # error the user cannot act on.
+        if not result["ok"] and PROVIDER_FIELDS[request.provider].get("local"):
+            if "not reachable" in str(result.get("reason", "")):
+                result["reason_code"] = "not_running"
+            elif "not installed" in str(result.get("reason", "")):
+                result["reason_code"] = "no_model"
         return result
 
     @app.post("/api/run")

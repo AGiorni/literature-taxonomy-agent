@@ -24,6 +24,9 @@ EXTRA_FOR = {
     "openai": "uv sync --extra llm",
 }
 
+# Which SDK each provider needs. "ollama" is deliberately absent: it talks HTTP
+# over urllib, so a local model needs no extra at all - which is the whole point
+# of offering it.
 SDK_FOR_PROVIDER = {"foundry": "anthropic", "azure-openai": "openai"}
 
 

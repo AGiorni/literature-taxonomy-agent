@@ -127,7 +127,10 @@ def run(
     key = corpus_key(cfg.embed.backend, encoder.name, *texts)
     X = embeddings.get(key)
     if X is None:
-        X = encoder.encode(texts)
+        X = encoder.encode(
+            texts,
+            lambda done: report("embed", done, len(texts), f"{done}/{len(texts)} encoded"),
+        )
         embeddings.set(key, X)
     report("embed", len(texts), len(texts), f"{X.shape[1]}d {encoder.name}")
 
@@ -141,15 +144,18 @@ def run(
     # ---- 5. score ----------------------------------------------------------
     report("score", 0, 1, "")
     assignment = assign_documents(X, root, cfg.score)
+    report("score", 1, 1, f"{len(assignment.assignments)} placed, {len(assignment.unsorted)} unsorted")
 
     # ---- 6. terms ----------------------------------------------------------
     report("terms", 0, 1, "")
     terms_by_node = node_terms(texts, {n.id: n.doc_indices for n in nodes}, cfg.terms)
     terms_by_doc = document_terms(texts, cfg.terms)
+    report("terms", 1, 1, f"{len(terms_by_node)} folders described")
 
     # ---- 7. layout ---------------------------------------------------------
-    report("layout", 0, 1, "")
+    report("layout", 0, 1, cfg.cluster.reducer)
     coords = layout_2d(X, cfg.cluster.reducer, cfg.cluster.random_state)
+    report("layout", 1, 1, f"{cfg.cluster.reducer} projection")
 
     # ---- 8. label ----------------------------------------------------------
     node_labels: dict[str, "NodeLabel"] | None = None
@@ -169,8 +175,10 @@ def run(
             report("coherence", 0, 1, "reviewing whole tree")
             coherence_edits = review_coherence(labeller, root, node_labels, terms_by_node)
             apply_renames(node_labels, coherence_edits)
+            report("coherence", 1, 1, f"{len(coherence_edits)} corrections")
 
     # ---- 9. assemble -------------------------------------------------------
+    report("assemble", 0, 1, "")
     if node_labels:
         labels = {n.id: node_labels[n.id].label for n in nodes}
     else:
@@ -188,6 +196,7 @@ def run(
         _verify_assignments(labeller, documents, folder_index, report)
 
     move_plan = build_move_plan(documents, folder_index, str(cfg.target_root))
+    report("assemble", 1, 1, f"{len(documents)} documents, {len(folders)} folders")
 
     return Taxonomy(
         generated_at=datetime.now(timezone.utc),

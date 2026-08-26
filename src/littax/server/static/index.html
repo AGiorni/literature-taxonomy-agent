@@ -218,8 +218,10 @@
 <div id="progress" class="progress" hidden>
   <div class="progress-inner">
     <h2 id="progress-stage">Working…</h2>
-    <div class="bar-track"><div class="bar-fill" id="progress-fill"></div></div>
-    <p class="muted small" id="progress-detail"></p>
+    <div class="bar-track" id="progress-track">
+      <div class="bar-fill" id="progress-fill"></div>
+    </div>
+    <p class="muted small"><span id="progress-detail"></span><span id="progress-pct"></span></p>
     <p class="error small" id="progress-error"></p>
     <div class="dialog-actions">
       <button class="btn ghost" id="progress-dismiss" type="button" hidden>Close</button>

@@ -947,9 +947,11 @@ function wireRunDialog() {
     }
     dialog.close();
     $("#progress").hidden = false;
-    $("#progress-stage").textContent = "Working…";
+    $("#progress-stage").textContent = "Starting";
+    $("#progress-detail").textContent = "";
     $("#progress-error").textContent = "";
     $("#progress-dismiss").hidden = true;
+    showProgress(0, 1);
 
     const response = await fetch("/api/run", {
       method: "POST",
@@ -970,6 +972,41 @@ function wireRunDialog() {
   };
 }
 
+/* The stage names the pipeline reports are internal; these are what they mean
+ * to someone watching. Anything unmapped falls back to the raw name. */
+const STAGE_NAMES = {
+  scan: "Finding PDFs",
+  ingest: "Reading PDFs",
+  embed: "Embedding documents",
+  cluster: "Finding clusters",
+  score: "Placing documents",
+  terms: "Extracting terms",
+  layout: "Projecting to 2-D",
+  label: "Naming folders",
+  coherence: "Reviewing the tree",
+  assemble: "Assembling",
+  verify: "Checking uncertain documents",
+  starting: "Starting",
+};
+
+/** Draw the bar, or sweep it when the stage cannot report a fraction.
+ *
+ *  total <= 1 means a single opaque call: score, layout and the like know only
+ *  "not started" and "done". Showing 0% for one of those is what made a healthy
+ *  run look hung, so they sweep instead. */
+function showProgress(done, total) {
+  const measurable = total > 1;
+  $("#progress-track").classList.toggle("indeterminate", !measurable);
+  if (measurable) {
+    const pct = Math.round((done / total) * 100);
+    $("#progress-fill").style.width = `${pct}%`;
+    $("#progress-pct").textContent = `${pct}%`;
+  } else {
+    $("#progress-fill").style.width = "";
+    $("#progress-pct").textContent = "";
+  }
+}
+
 function wireProgress() {
   const source = new EventSource("/api/progress");
   let lastVersion = null;
@@ -981,9 +1018,9 @@ function wireProgress() {
     if (p.status === "running") {
       $("#progress").hidden = false;
       $("#progress-dismiss").hidden = true;
-      $("#progress-stage").textContent = p.stage || "Working…";
+      $("#progress-stage").textContent = STAGE_NAMES[p.stage] || p.stage || "Working…";
       $("#progress-detail").textContent = p.detail || "";
-      $("#progress-fill").style.width = `${Math.round((p.done / Math.max(p.total, 1)) * 100)}%`;
+      showProgress(p.done, p.total);
     } else if (p.status === "error") {
       $("#progress").hidden = false;
       $("#progress-stage").textContent = "Failed";

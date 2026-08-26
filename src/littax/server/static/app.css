@@ -334,6 +334,23 @@ dialog::backdrop { background: rgba(0,0,0,0.45); }
 .bar-track { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin: 14px 0 8px; }
 .bar-fill { height: 100%; background: var(--series-1); width: 0; transition: width 0.25s ease; }
 
+/* Some stages are one opaque call - a single UMAP projection cannot report a
+   fraction of itself. Rather than leave the bar at zero, which reads as a
+   hang, it sweeps: honest about being busy without inventing a percentage. */
+.bar-track.indeterminate .bar-fill {
+  width: 35%; transition: none;
+  animation: sweep 1.4s ease-in-out infinite;
+}
+@keyframes sweep {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar-track.indeterminate .bar-fill { animation-duration: 3s; }
+}
+
+#progress-pct { float: right; font-variant-numeric: tabular-nums; }
+
 /* Sits above the progress overlay (z-index 50): if the script is broken, that
    overlay may be stuck on screen, and this is the message that explains it. */
 .js-error {

@@ -16,7 +16,13 @@ from typing import Any
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,6 +40,26 @@ from littax.config import (
 from littax.env import loaded_from, present_keys, write_keys
 
 STATIC = Path(__file__).parent / "static"
+
+class NoCacheStatic(StaticFiles):
+    """Static files that must be revalidated, never assumed fresh.
+
+    Starlette sends ETag and Last-Modified but no Cache-Control, which leaves
+    the browser free to *heuristically* cache - reusing app.js for minutes
+    without asking. index.html is read from disk on every request, so the two
+    drift apart: switching branch or editing the script leaves fresh markup
+    paired with a stale script, and the mismatch shows up as a dead button
+    rather than an error.
+
+    "no-cache" means revalidate, not "do not store": the ETag still turns an
+    unchanged file into a 304 with no body.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 
 Provider = Literal["foundry", "azure-openai", "ollama"]
 
@@ -248,8 +274,13 @@ def create_app(cfg: Config) -> FastAPI:
     session = Session(cfg.source_root if has_project(cfg.source_root) else None)
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return (STATIC / "index.html").read_text(encoding="utf-8")
+    def index() -> HTMLResponse:
+        return HTMLResponse(
+            (STATIC / "index.html").read_text(encoding="utf-8"),
+            # The page is read from disk every request, so it is always current.
+            # Say so, or the browser may pair fresh markup with a stale script.
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/api/config")
     def get_config() -> dict[str, Any]:
@@ -502,7 +533,7 @@ def create_app(cfg: Config) -> FastAPI:
                 return FileResponse(candidate, media_type="application/pdf")
         raise HTTPException(404, f"unknown document {document_id}")
 
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", NoCacheStatic(directory=STATIC), name="static")
     return app
 
 

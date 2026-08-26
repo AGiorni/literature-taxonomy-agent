@@ -241,6 +241,24 @@
   </div>
 </div>
 
+<!-- A script that dies part-way leaves buttons wired to nothing, which looks
+     like the app ignoring you rather than like a failure. Registered before the
+     scripts it guards so a parse error in them still surfaces here. -->
+<div id="js-error" class="js-error" hidden>
+  <strong>The page did not load correctly.</strong>
+  <span>Try a hard reload (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>) — this
+    usually means the browser kept a script from an earlier version.</span>
+  <code id="js-error-detail"></code>
+</div>
+<script>
+  window.addEventListener("error", function (event) {
+    var banner = document.getElementById("js-error");
+    if (!banner) return;
+    document.getElementById("js-error-detail").textContent = event.message || "";
+    banner.hidden = false;
+  });
+</script>
+
 <script src="/static/vendor/plotly.min.js"></script>
 <script src="/static/app.js"></script>
 </body>

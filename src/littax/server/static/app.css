@@ -344,5 +344,22 @@ dialog::backdrop { background: rgba(0,0,0,0.45); }
 .bar-track { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin: 14px 0 8px; }
 .bar-fill { height: 100%; background: var(--series-1); width: 0; transition: width 0.25s ease; }
 
+/* Sits above the progress overlay (z-index 50): if the script is broken, that
+   overlay may be stuck on screen, and this is the message that explains it. */
+.js-error {
+  position: fixed; inset: 0 0 auto; z-index: 100;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  padding: 10px 16px; font-size: 13px;
+  background: var(--critical); color: #fff;
+}
+.js-error kbd {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px;
+  background: rgba(255, 255, 255, 0.22); border-radius: 4px; padding: 1px 5px;
+}
+.js-error code {
+  flex-basis: 100%; font-size: 11px; opacity: 0.85;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
 .empty { display: grid; place-items: center; gap: 10px; padding: 90px 20px; text-align: center; }
 .empty h1 { font-size: 22px; }

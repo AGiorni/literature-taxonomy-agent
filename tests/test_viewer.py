@@ -171,6 +171,36 @@ class TestHiddenAttribute:
         assert tag and "hidden" in tag.group(0)
 
 
+class TestScriptMarkupAgreement:
+    """The script and the markup must describe the same page.
+
+    `$("#missing")` returns null, and the TypeError kills the rest of whatever
+    function it is in. When that function is one of the wiring calls at the
+    bottom of app.js, every later one is skipped too - so a single stray id
+    silently unwires the progress stream and leaves buttons doing nothing.
+    That failure reads as "the app ignores me", which is expensive to diagnose
+    from the outside; catching it here costs nothing.
+    """
+
+    JS = TestHiddenAttribute.JS
+    HTML = TestHiddenAttribute.HTML
+
+    def test_every_referenced_id_exists(self):
+        referenced = set(re.findall(r'\$\("#([\w-]+)"\)', self.JS))
+        defined = set(re.findall(r'id="([\w-]+)"', self.HTML))
+        assert referenced, "expected the script to address elements by id"
+        missing = sorted(referenced - defined)
+        assert not missing, f"app.js addresses ids absent from index.html: {missing}"
+
+    def test_a_broken_script_is_visible(self):
+        """A dead page must say so, rather than just sitting there."""
+        assert 'id="js-error"' in self.HTML
+        # Registered ahead of the scripts it guards, so a parse error in
+        # app.js still reaches it.
+        handler = self.HTML.index('addEventListener("error"')
+        assert handler < self.HTML.index('src="/static/app.js"')
+
+
 def test_taxonomy_json_round_trips(taxonomy_file: Path):
     """The viewer reads raw JSON, so the schema must survive serialisation."""
     data = json.loads(taxonomy_file.read_text(encoding="utf-8"))

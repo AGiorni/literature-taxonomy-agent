@@ -7,7 +7,8 @@ cosine similarity a plain dot product.
 
 from __future__ import annotations
 
-from typing import Protocol
+import math
+from typing import Callable, Protocol
 
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
@@ -54,10 +55,26 @@ ACADEMIC_STOPWORDS = frozenset(
 )
 
 
+# Roughly how many times a corpus should report progress while encoding. A
+# fixed chunk size cannot serve both a 40-paper folder and a 4,000-paper one:
+# it either updates twice or floods. Aiming for a number of updates instead
+# keeps the bar moving at about the same rate whatever the corpus.
+PROGRESS_UPDATES = 30
+MIN_CHUNK, MAX_CHUNK = 8, 64
+
+
+def progress_chunk(n_texts: int) -> int:
+    """Texts to encode between progress reports."""
+    return max(MIN_CHUNK, min(MAX_CHUNK, math.ceil(n_texts / PROGRESS_UPDATES)))
+
+# Called with the number of texts finished so far.
+EncodeProgress = Callable[[int], None]
+
+
 class Encoder(Protocol):
     name: str
 
-    def encode(self, texts: list[str]) -> np.ndarray: ...
+    def encode(self, texts: list[str], progress: EncodeProgress | None = None) -> np.ndarray: ...
 
 
 class TfidfEncoder:
@@ -85,14 +102,19 @@ class TfidfEncoder:
             lowercase=True,
         )
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    def encode(self, texts: list[str], progress: EncodeProgress | None = None) -> np.ndarray:
+        # One fit over the whole corpus; there is no partial state to report
+        # against, and it is fast enough that there would be nothing to watch.
         counts = self.vectoriser.fit_transform(texts)
         n_components = min(self.cfg.svd_components, min(counts.shape) - 1)
         lsa = make_pipeline(
             TruncatedSVD(n_components=n_components, random_state=42),
             Normalizer(copy=False),
         )
-        return lsa.fit_transform(counts).astype(np.float32)
+        vectors = lsa.fit_transform(counts).astype(np.float32)
+        if progress:
+            progress(len(texts))
+        return vectors
 
 
 class SentenceTransformerEncoder:
@@ -107,7 +129,7 @@ class SentenceTransformerEncoder:
         self.cfg = cfg
         self.name = cfg.model_name or self.DEFAULTS[cfg.backend]
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    def encode(self, texts: list[str], progress: EncodeProgress | None = None) -> np.ndarray:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - depends on optional extra
@@ -116,14 +138,33 @@ class SentenceTransformerEncoder:
                 "Install it with:  uv sync --extra ml"
             ) from exc
         model = SentenceTransformer(self.name)
-        vectors = model.encode(
-            texts,
-            batch_size=16,
-            show_progress_bar=True,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
-        return vectors.astype(np.float32)
+
+        # Encoded in chunks purely so the caller can report progress: this is
+        # the slowest stage of a run, and encoding a whole corpus in one call
+        # leaves the bar at zero for minutes, which reads as a hang. Each
+        # vector depends only on its own text, so chunking changes nothing
+        # about the result.
+        done = 0
+        chunks: list[np.ndarray] = []
+        size = progress_chunk(len(texts))
+        for start in range(0, len(texts), size):
+            chunk = texts[start : start + size]
+            chunks.append(
+                model.encode(
+                    chunk,
+                    batch_size=16,
+                    # We report progress ourselves; a tqdm bar per chunk would
+                    # fight with the caller's own display.
+                    show_progress_bar=False,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                )
+            )
+            done += len(chunk)
+            if progress:
+                progress(done)
+
+        return np.vstack(chunks).astype(np.float32)
 
 
 def build_encoder(cfg: EmbedConfig) -> Encoder:

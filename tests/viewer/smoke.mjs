@@ -22,7 +22,13 @@ function makeEl(tag = "div") {
     tagName: tag, innerHTML: "", textContent: "", value: "", hidden: false,
     dataset: {}, style: { setProperty() {} }, title: "", checked: true,
     children: [], offsetHeight: 130, className: "",
-    classList: { contains: (c) => String(el.className).includes(c), add() {}, remove() {} },
+    // A real token list, so the harness can assert on what the code sets.
+    classList: {
+      contains: (c) => String(el.className).split(/\s+/).includes(c),
+      add(c) { if (!el.classList.contains(c)) el.className = (el.className + " " + c).trim(); },
+      remove(c) { el.className = String(el.className).split(/\s+/).filter((t) => t && t !== c).join(" "); },
+      toggle(c, on) { (on ?? !el.classList.contains(c)) ? el.classList.add(c) : el.classList.remove(c); },
+    },
     setAttribute() {}, getAttribute: () => null, appendChild(c) { el.children.push(c); },
     removeAllListeners() {}, on(evt, fn) { el._handlers = el._handlers || {}; el._handlers[evt] = fn; },
     addEventListener() {}, focus() {}, showModal() { el.open = true; }, close() { el.open = false; },
@@ -70,7 +76,9 @@ const sandbox = {
   localStorage: { getItem: () => null, setItem() {} },
   matchMedia: () => ({ matches: false }),
   innerWidth: 1280, innerHeight: 800,
-  EventSource: class { constructor() { this.onmessage = null; } },
+  EventSource: class {
+    constructor() { this.onmessage = null; sandbox.progressSource = this; }
+  },
   addEventListener() {},
   encodeURIComponent,
   fetch: async (url) => {
@@ -265,6 +273,44 @@ else {
 }
 
 console.log(`tooltip: driven over ${Math.min(treeRows.length, 6)} rows`);
+
+/* ---- progress bar ---------------------------------------------------------
+ * A stage that cannot report a fraction must sweep rather than sit at 0%,
+ * which is what made a healthy run look hung.                               */
+
+const frame = (stage, done, total, detail = "") =>
+  ({ status: "running", stage, done, total, detail, error: null, version: 0 });
+
+{
+  const track = registry.get("#progress-track") ?? doc.querySelector("#progress-track");
+  const pct = registry.get("#progress-pct") ?? doc.querySelector("#progress-pct");
+  const fill = registry.get("#progress-fill") ?? doc.querySelector("#progress-fill");
+  const send = (f) => sandbox.progressSource?.onmessage?.({ data: JSON.stringify(f) });
+
+  if (!sandbox.progressSource) errors.push("EventSource was never opened");
+
+  // Measurable: a real percentage and no sweep.
+  drive("embed 96/376", () => send(frame("embed", 96, 376, "96/376 encoded")));
+  if (track.classList.contains("indeterminate")) errors.push("measurable stage should not sweep");
+  if (pct.textContent !== "26%") errors.push(`expected 26%, got ${pct.textContent}`);
+  if (fill.style.width !== "26%") errors.push(`bar not filled: ${fill.style.width}`);
+  if (registry.get("#progress-stage").textContent !== "Embedding documents") {
+    errors.push(`stage name not humanised: ${registry.get("#progress-stage").textContent}`);
+  }
+
+  // Opaque: one call that knows only "not started" and "done".
+  drive("layout 0/1", () => send(frame("layout", 0, 1, "umap")));
+  if (!track.classList.contains("indeterminate")) {
+    errors.push("an unmeasurable stage must sweep, not sit at 0%");
+  }
+  if (pct.textContent !== "") errors.push("a swept stage must not claim a percentage");
+
+  // ...and back again, so the class does not stick.
+  drive("verify 3/4", () => send(frame("verify", 3, 4)));
+  if (track.classList.contains("indeterminate")) errors.push("sweep stuck on a measurable stage");
+
+  console.log("progress: measurable and indeterminate stages both render");
+}
 
 /* ---- the run wizard -------------------------------------------------------
  * Handlers hang off the stub elements, so the harness can drive each step the
